@@ -61,7 +61,7 @@ claude mcp add easyeda-copilot -- npx easyeda-copilot-mcp
 3. 在 EasyEDA Pro 中打开原理图。
 4. EasyEDA Copilot 将自动连接。仅在需要暂停或恢复扫描时使用 `Copilot -> MCP`。
 
-请参阅  [README к пакету MCP](mcp/README.md)
+请参阅  [MCP 包 README](mcp/README.md)
 
 ## PCB 工作流（仅限 MCP
 
