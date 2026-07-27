@@ -1,4 +1,4 @@
-[English](../README.md) | 简体中文 | [Русский](README.ru.md)
+[English](README.md) | 简体中文 | [Русский](README.ru.md)
 # EasyEDA Copilot
 适用于 EasyEDA Pro 和 JLCEDA 的 AI 助手。支持通过自然语言生成原理图、完善现有电路、根据需求搜索 LCSC 元器件、运行 SPICE 仿真，并可在 EDA 工作流中直接复用经过验证的电路模块。
 
@@ -61,7 +61,7 @@ claude mcp add easyeda-copilot -- npx easyeda-copilot-mcp
 3. 在 EasyEDA Pro 中打开原理图。
 4. EasyEDA Copilot 将自动连接。仅在需要暂停或恢复扫描时使用 `Copilot -> MCP`。
 
-请参阅  [README к пакету MCP](mcp/README.md)
+请参阅  [MCP 包 README](mcp/README.md)
 
 ## PCB 工作流（仅限 MCP
 
