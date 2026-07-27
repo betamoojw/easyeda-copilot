@@ -1,3 +1,4 @@
+English | [简体中文](README.zh-CN.md) | [Русский](README.ru.md)
 # EasyEDA Copilot
 
 AI-powered assistant for EasyEDA Pro and JLCEDA. Generate schematics from natural language, complete existing circuits, search LCSC components by requirements, run SPICE simulations, and reuse proven circuit blocks directly inside your EDA workflow.
