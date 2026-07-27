@@ -1,3 +1,4 @@
+English | [简体中文](README.zh-CN.md) | [Русский](README.ru.md)
 # easyeda-copilot-mcp
 
 MCP server for EasyEDA Copilot.
