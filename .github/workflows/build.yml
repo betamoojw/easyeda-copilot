@@ -56,7 +56,9 @@ jobs:
 
       - name: Publish MCP package to npm
         if: startsWith(github.ref, 'refs/tags/v')
-        run: npm publish --workspace=mcp --access public
+        run: |
+          package_spec=$(node -p "const p = require('./mcp/package.json'); p.name + '@' + p.version")
+          npm view "$package_spec" version || npm publish --workspace=mcp --access public
 
       - name: Install MCP Registry publisher
         if: startsWith(github.ref, 'refs/tags/v')
