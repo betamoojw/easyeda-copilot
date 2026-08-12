@@ -18,6 +18,10 @@ AI-powered assistant for EasyEDA Pro and JLCEDA. Connect an MCP-capable agent to
   </a>
 </p>
 
+<p align="center">
+  <img src="docs/media/banner.gif" alt="EasyEDA Copilot MCP workflow: control EasyEDA from an external AI agent">
+</p>
+
 ## What it does
 
 EasyEDA Copilot adds an AI design layer to EasyEDA Pro:
@@ -42,7 +46,7 @@ In EasyEDA Pro:
 1. Open `Settings -> Extensions -> Extensions Manager`.
 2. Click `Import Extensions`.
 3. Select the downloaded `.eext` file.
-4. Enable `External Interactions`.
+4. Enable `External Interactions` as shown in [Extension permissions](docs/settings.md#extension-permissions).
 
 Add the MCP server to your agent:
 

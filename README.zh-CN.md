@@ -17,6 +17,10 @@
 </a>
 </p>
 
+<p align="center">
+<img src="docs/media/banner.gif" alt="EasyEDA Copilot MCP 工作流：通过外部 AI 代理控制 EasyEDA">
+</p>
+
 ## 核心功能
 EasyEDA Copilot 为 EasyEDA Pro 引入了全新的 AI 设计层：
 - **文本生成电路**：描述您需要的电路，让 MCP 代理为您生成原理图方案。
@@ -37,7 +41,7 @@ EasyEDA Copilot 为 EasyEDA Pro 引入了全新的 AI 设计层：
 1. 打开 `设置 -> 扩展 -> 扩展管理器` (`Settings -> Extensions -> Extensions Manager`)。
 2. 点击 `导入扩展` (`Import Extensions`)。
 3. 选择下载好的 `.eext` 文件。
-4. 允许 `外部交互` (`External Interactions`)。
+4. 按照[扩展权限](docs/settings.md#extension-permissions)中的示例允许 `外部交互` (`External Interactions`)。
 
 将 MCP 服务器添加到您的代理：
 

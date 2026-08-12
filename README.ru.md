@@ -17,6 +17,10 @@
   </a>
 </p>
 
+<p align="center">
+  <img src="docs/media/banner.gif" alt="Работа EasyEDA Copilot через MCP: управление EasyEDA из внешнего AI-агента">
+</p>
+
 ## Возможности Copilot
 EasyEDA Copilot добавляет новый уровень AI-проектирования в EasyEDA Pro:
 - **Генерация схем по текстовому описанию**: опишите нужную схему и позвольте MCP-агенту собрать предложенный вариант.
@@ -37,7 +41,7 @@ EasyEDA Copilot добавляет новый уровень AI-проектир
 1. Откройте `Settings -> Extensions -> Extensions Manager`.
 2. Нажмите `Import Extensions`.
 3. Выберите скачанный `.eext` файл.
-4. Разрешите `External Interactions`.
+4. Разрешите `External Interactions`, как показано в разделе [Разрешения расширения](docs/settings.md#extension-permissions).
 
 Добавьте MCP-сервер к агенту:
 
