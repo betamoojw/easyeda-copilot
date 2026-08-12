@@ -998,9 +998,15 @@ export async function getPcbRaw(): Promise<RawPcb> {
     if (!boardPolygon) throw new Error('Board outline is missing.')
 
     const components: RawPcbComponent[] = []
+    const padOwnerByPrimitiveId = new Map<string, string>();
     for (const c of await eda.pcb_PrimitiveComponent.getAll().catch(() => [])) {
+        const designator = c.getState_Designator() || '';
+        for (const statePad of c.getState_Pads() ?? []) {
+            const primitiveId = safeString(statePad.primitiveId);
+            if (primitiveId) padOwnerByPrimitiveId.set(primitiveId, designator);
+        }
         components.push({
-            designator: c.getState_Designator() || '',
+            designator,
             x: milToMm(c.getState_X()),
             y: milToMm(c.getState_Y()),
             rotate: c.getState_Rotation(),
@@ -1016,7 +1022,10 @@ export async function getPcbRaw(): Promise<RawPcb> {
 
     const pads: RawPcbPad[] = []
     for (const p of await eda.pcb_PrimitivePad.getAll().catch(() => [])) {
+        const primitiveId = p.getState_PrimitiveId();
         pads.push({
+            id: primitiveId,
+            component: padOwnerByPrimitiveId.get(primitiveId),
             x: milToMm(p.getState_X()),
             y: milToMm(p.getState_Y()),
             net: safeString(p.getState_Net()) ?? '',
