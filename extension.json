@@ -37,7 +37,7 @@
 				"menuItems": [
 					{
 						"id": "Interface",
-						"title": "Interface",
+						"title": "Interface (Legacy)",
 						"registerFn": "openInterface"
 					},
 					{
