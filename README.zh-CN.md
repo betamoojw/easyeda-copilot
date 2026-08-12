@@ -43,6 +43,12 @@ EasyEDA Copilot 为 EasyEDA Pro 引入了全新的 AI 设计层：
 3. 选择下载好的 `.eext` 文件。
 4. 按照[扩展权限](docs/settings.md#extension-permissions)中的示例允许 `外部交互` (`External Interactions`)。
 
+<p align="center">
+  <a href="docs/media/params.png">
+    <img src="docs/media/params.png" alt="为 EasyEDA Copilot 启用 External Interactions" width="560">
+  </a>
+</p>
+
 将 MCP 服务器添加到您的代理：
 
 Codex:

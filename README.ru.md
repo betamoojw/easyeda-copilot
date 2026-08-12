@@ -43,6 +43,12 @@ EasyEDA Copilot добавляет новый уровень AI-проектир
 3. Выберите скачанный `.eext` файл.
 4. Разрешите `External Interactions`, как показано в разделе [Разрешения расширения](docs/settings.md#extension-permissions).
 
+<p align="center">
+  <a href="docs/media/params.png">
+    <img src="docs/media/params.png" alt="Включение External Interactions для EasyEDA Copilot" width="560">
+  </a>
+</p>
+
 Добавьте MCP-сервер к агенту:
 
 Codex:

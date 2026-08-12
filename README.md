@@ -48,6 +48,12 @@ In EasyEDA Pro:
 3. Select the downloaded `.eext` file.
 4. Enable `External Interactions` as shown in [Extension permissions](docs/settings.md#extension-permissions).
 
+<p align="center">
+  <a href="docs/media/params.png">
+    <img src="docs/media/params.png" alt="Enable External Interactions for EasyEDA Copilot" width="560">
+  </a>
+</p>
+
 Add the MCP server to your agent:
 
 Codex:
