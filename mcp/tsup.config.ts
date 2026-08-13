@@ -9,12 +9,17 @@ const sdkEsmPath = (...parts: string[]) =>
     join(sdkDistDir, 'esm', ...parts);
 
 export default defineConfig({
-    entry: ['src/index.ts', 'src/pcb-preview/cli.ts', 'src/pcb-preview/index.ts'],
+    entry: [
+        'src/index.ts',
+        'src/pcb-preview/cli.ts',
+        'src/pcb-preview/index.ts',
+        'src/routing/easyeda-autoroute-adapter.ts',
+    ],
     format: ['esm'],
     clean: true,
     dts: false,
     sourcemap: false,
-    noExternal: ['@modelcontextprotocol/sdk', '@copilot/shared'],
+    noExternal: ['@modelcontextprotocol/sdk', '@copilot/shared', '@easyeda-copilot/router'],
     esbuildPlugins: [
         {
             name: 'mcp-sdk-extensionless-imports',

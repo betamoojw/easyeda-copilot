@@ -21,6 +21,7 @@
   ],
   "scripts": {
     "build": "tsup",
+    "test:routing-adapter": "npm run build && node scripts/check-routing-adapter.mjs",
     "clean": "rimraf dist",
     "typecheck": "tsc --noEmit",
     "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
@@ -29,6 +30,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@easyeda-copilot/router": "file:../../copilot-router",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "find-up": "^5.0.0",
     "sharp": "^0.35.0",
