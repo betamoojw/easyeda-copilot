@@ -716,6 +716,49 @@ async function drawPolygons(polygons: BoardAssemble["polygons"]) {
     }
 }
 
+export type RoutingCopperApplication = {
+    tracks?: BoardAssemble["tracks"];
+    vias?: BoardAssemble["vias"];
+    zones?: Array<{
+        net: string;
+        layer: "top" | "bottom";
+        points: Array<{ x: number; y: number }>;
+        priority?: number;
+        minThicknessMm?: number;
+    }>;
+};
+
+/** Replace only router-owned copper in one checkpointed EasyEDA transaction. */
+export async function applyRoutingCopper(application: RoutingCopperApplication) {
+    await checkpointer.save(false);
+    await clearCurrentPcbBoard({ preserveBoardOutline: true });
+    await drawTracks(application.tracks);
+    await drawVias(application.vias);
+    for (const zone of application.zones ?? []) {
+        const points = normalizePolygonPoints(zone.points);
+        if (points.length < 3) continue;
+        const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(points));
+        if (!polygon) throw new Error(`invalid routing zone geometry: ${zone.net}`);
+        const pour = await createCommittedPour({
+            net: safeNetName(zone.net),
+            layer: layerToCopper(zone.layer),
+            polygon,
+            preserveSilos: false,
+            pourName: `copilot-router:${zone.net}`,
+            pourPriority: zone.priority ?? 0,
+            lineWidth: mmToMil(zone.minThicknessMm ?? DEFAULT_POUR_LINE_WIDTH_MM),
+        });
+        await commitPourCopperRegion(pour);
+    }
+    await refreshPcbState();
+    return {
+        applied: true,
+        tracks: application.tracks?.length ?? 0,
+        vias: application.vias?.length ?? 0,
+        zones: application.zones?.length ?? 0,
+    };
+}
+
 async function getCopperLayers(): Promise<TPCB_LayersOfCopper[]> {
     const layerCount = await eda.pcb_Layer.getTheNumberOfCopperLayers().catch(error => {
         warning(`PCB copper layer count read failed, fallback to 2 layers: ${(error as Error).message}`);

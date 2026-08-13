@@ -326,9 +326,23 @@ export function importEasyEdaAutorouteJson(
         if (name) perNetValues.set(name, ruleForNet(root, net));
     }
     const fallback = defaultRules([...perNetValues.values()]);
+    const differentialPairs = Object.entries(record(record(root.classes)?.differentialPairClasses) ?? {})
+        .flatMap(([id, members]) => {
+            const nets = (Array.isArray(members) ? members : []).map(text)
+                .filter((item): item is string => Boolean(item));
+            if (nets.length !== 2 || nets[0] === nets[1]) {
+                diagnostics.push({
+                    code: 'EASYEDA_DIFF_PAIR_INVALID', severity: 'error',
+                    message: `Differential pair class ${id} must contain exactly two distinct nets.`,
+                });
+                return [];
+            }
+            return [{ id, positive: nets[0], negative: nets[1] }];
+        });
     const rules: RoutingRules = {
         default: fallback,
         nets: [...netNames].sort().map(net => ({ net, values: perNetValues.get(net) ?? fallback })),
+        ...(differentialPairs.length ? { differentialPairs } : {}),
     };
     const importedTracks: RoutedTrack[] = records(root.tracks).flatMap((track, index) => {
         const net = text(track.net);

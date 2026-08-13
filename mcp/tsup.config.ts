@@ -14,6 +14,8 @@ export default defineConfig({
         'src/pcb-preview/cli.ts',
         'src/pcb-preview/index.ts',
         'src/routing/easyeda-autoroute-adapter.ts',
+        'src/routing/easyeda-drc-adapter.ts',
+        'src/routing/run-easyeda-routing.ts',
     ],
     format: ['esm'],
     clean: true,

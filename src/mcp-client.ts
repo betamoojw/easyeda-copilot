@@ -1,5 +1,12 @@
 import { assembleCircuit } from './eda/assemble';
-import { assembleBoard, clearCurrentPcbBoard, pourDefaultGroundAndSutureVias, type GroundSutureOptions } from './eda/pcb-assemble';
+import {
+    applyRoutingCopper,
+    assembleBoard,
+    clearCurrentPcbBoard,
+    pourDefaultGroundAndSutureVias,
+    type GroundSutureOptions,
+    type RoutingCopperApplication,
+} from './eda/pcb-assemble';
 import { checkpointer } from './eda/checkpointer';
 import { checkPcbDrc } from './eda/drc';
 import { getPcb, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
@@ -978,6 +985,99 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                 type: file.type,
                 text: await file.text(),
             });
+            return;
+        }
+
+        if (message.event === 'export-routing-input') {
+            const file = await eda.pcb_ManufactureData.getAutoRouteJsonFile('Copilot_Routing_Input');
+            if (!file) throw new Error('EasyEDA returned empty autoroute JSON file');
+            reply(true, {
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                text: await file.text(),
+                drc: await exportPcbDrcRules(),
+            });
+            return;
+        }
+
+        if (message.event === 'apply-routing-result') {
+            const bundle = body.bundle;
+            const copper = body.copper;
+            if (bundle === undefined && copper === undefined) throw new Error('Routing result has neither DRC nor copper changes.');
+            if (bundle !== undefined) assertDrcBundle(bundle);
+            if (copper !== undefined && !isRecord(copper)) throw new Error('Invalid routing copper payload.');
+
+            // One outer checkpoint makes DRC + complete copper replacement a
+            // single host transaction. The helper's extra checkpoint remains
+            // a useful recovery point for EasyEDA itself.
+            const checkpointId = await checkpointer.save(false);
+            try {
+                const rules = bundle === undefined ? undefined : await applyPcbDrcRules(bundle);
+                let copperResult: unknown;
+                if (isRecord(copper)) {
+                    const layer = (name: unknown): 'top' | 'bottom' => {
+                        if (name === 'TOP') return 'top';
+                        if (name === 'BOTTOM') return 'bottom';
+                        throw new Error(`EasyEDA live application currently supports only TOP/BOTTOM copper, received ${String(name)}.`);
+                    };
+                    const tracks = Array.isArray(copper.tracks) ? copper.tracks.map((candidate) => {
+                        if (!isRecord(candidate) || typeof candidate.net !== 'string'
+                            || typeof candidate.widthMm !== 'number' || !Array.isArray(candidate.points)) {
+                            throw new Error('Invalid routed track payload.');
+                        }
+                        return {
+                            net: candidate.net,
+                            layer: layer(candidate.layer),
+                            width: candidate.widthMm,
+                            points: candidate.points.map(point => {
+                                if (!isRecord(point) || typeof point.x !== 'number' || typeof point.y !== 'number') {
+                                    throw new Error('Invalid routed track point.');
+                                }
+                                return { x: point.x, y: -point.y };
+                            }),
+                        };
+                    }) : [];
+                    const vias = Array.isArray(copper.vias) ? copper.vias.map((candidate) => {
+                        if (!isRecord(candidate) || typeof candidate.net !== 'string' || !isRecord(candidate.at)
+                            || typeof candidate.at.x !== 'number' || typeof candidate.at.y !== 'number'
+                            || typeof candidate.diameterMm !== 'number' || typeof candidate.drillMm !== 'number') {
+                            throw new Error('Invalid routed via payload.');
+                        }
+                        return {
+                            net: candidate.net, x: candidate.at.x, y: -candidate.at.y,
+                            diameter: candidate.diameterMm, drill: candidate.drillMm,
+                        };
+                    }) : [];
+                    const zones = Array.isArray(copper.zones) ? copper.zones.flatMap((candidate) => {
+                        if (!isRecord(candidate) || typeof candidate.net !== 'string' || !isRecord(candidate.outline)
+                            || !Array.isArray(candidate.outline.outer) || !Array.isArray(candidate.layers)) {
+                            throw new Error('Invalid routed zone payload.');
+                        }
+                        if (Array.isArray(candidate.outline.holes) && candidate.outline.holes.length) {
+                            throw new Error(`EasyEDA live apply cannot preserve zone holes yet: ${candidate.net}.`);
+                        }
+                        return candidate.layers.map(name => ({
+                            net: candidate.net,
+                            layer: layer(name),
+                            points: candidate.outline.outer.map(point => {
+                                if (!isRecord(point) || typeof point.x !== 'number' || typeof point.y !== 'number') {
+                                    throw new Error('Invalid routed zone point.');
+                                }
+                                return { x: point.x, y: -point.y };
+                            }),
+                            ...(typeof candidate.priority === 'number' ? { priority: candidate.priority } : {}),
+                            ...(typeof candidate.minThicknessMm === 'number' ? { minThicknessMm: candidate.minThicknessMm } : {}),
+                        }));
+                    }) : [];
+                    copperResult = await applyRoutingCopper({ tracks, vias, zones } satisfies RoutingCopperApplication);
+                }
+                reply(true, { applied: true, rules, copper: copperResult });
+            } catch (error) {
+                const restored = await checkpointer.restore(checkpointId, true).catch(() => false);
+                const message = error instanceof Error ? error.message : String(error);
+                throw new Error(restored ? `${message}; routing transaction rolled back` : `${message}; routing rollback failed`);
+            }
             return;
         }
 
