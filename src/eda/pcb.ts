@@ -1039,8 +1039,8 @@ export async function getPcbRaw(): Promise<RawPcb> {
             rotation: p.getState_Rotation(),
             hole: p.getState_Hole() ? {
                 data: p.getState_Hole()!.map(v => typeof v === 'number' ? milToMm(v) : v),
-                offsetX: milToMm(p.getState_HoleOffsetX()),
-                offsetY: milToMm(p.getState_HoleOffsetY()),
+                offsetX: toMmCopperGrid(p.getState_HoleOffsetX()),
+                offsetY: toMmCopperGrid(p.getState_HoleOffsetY()),
                 rotation: p.getState_HoleRotation(),
             } : undefined
         });
