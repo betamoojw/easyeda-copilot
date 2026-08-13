@@ -1013,7 +1013,7 @@ export async function getPcbRaw(): Promise<RawPcb> {
             layer: rawLayerName(c.getState_Layer()),
             bbox: await eda.pcb_Primitive.getPrimitivesBBox([c.getState_PrimitiveId()]).then(box => box ? ({
                 left: milToMm(box.minX),
-                right: milToMm(box.maxY),
+                right: milToMm(box.maxX),
                 top: milToMm(box.maxY),
                 bottom: milToMm(box.minY),
             }) : undefined)
@@ -1039,8 +1039,8 @@ export async function getPcbRaw(): Promise<RawPcb> {
             rotation: p.getState_Rotation(),
             hole: p.getState_Hole() ? {
                 data: p.getState_Hole()!.map(v => typeof v === 'number' ? milToMm(v) : v),
-                offsetX: p.getState_HoleOffsetX(),
-                offsetY: p.getState_HoleOffsetY(),
+                offsetX: milToMm(p.getState_HoleOffsetX()),
+                offsetY: milToMm(p.getState_HoleOffsetY()),
                 rotation: p.getState_HoleRotation(),
             } : undefined
         });
