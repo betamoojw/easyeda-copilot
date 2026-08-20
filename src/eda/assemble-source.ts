@@ -238,15 +238,51 @@ async function placeSeeds(
     projectUuid: string,
 ): Promise<Set<string>> {
     const seededKeys = new Set<string>();
-    const placementQueue = new PQueue({ concurrency: 5 });
-    await placementQueue.addAll([...groups.entries()].map(([key, group]) => async () => {
-        if (componentTemplateCache.has(getTemplateCacheKey(projectUuid, key))) return;
-        const seed = group[0];
+    const pending = [...groups.entries()].filter(([key]) =>
+        !componentTemplateCache.has(getTemplateCacheKey(projectUuid, key)),
+    );
+    if (!pending.length) return seededKeys;
+
+    const commitSeed = async (key: string, seed: PlannedComponent) => {
         const primitive = await createSeedComponent(seed);
         seed.primitiveId = primitive.getState_PrimitiveId();
         seededKeys.add(key);
         eda.sys_Log.add(`[source-assemble] Seed ${seed.input.designator}: ${seed.primitiveId}`);
+    };
+    const placementQueue = new PQueue({ concurrency: 5 });
+    const batchResults = await placementQueue.addAll(pending.map(([key, group]) => async () => {
+        const seed = group[0];
+        try {
+            await commitSeed(key, seed);
+            return { key, seed };
+        } catch (error) {
+            return { key, seed, error };
+        }
     }));
+
+    for (const failed of batchResults.filter(result => result.error)) {
+        let lastError = failed.error;
+        eda.sys_Log.add(
+            `[source-assemble] Parallel seed failed for ${failed.seed.input.designator}; retrying serially: ` +
+            `${(lastError as Error).message}`,
+            ESYS_LogType.WARNING,
+        );
+        for (let attempt = 1; attempt <= 4; attempt++) {
+            await new Promise<void>(resolve => setTimeout(resolve, attempt * 75));
+            try {
+                await commitSeed(failed.key, failed.seed);
+                lastError = undefined;
+                break;
+            } catch (error) {
+                lastError = error;
+            }
+        }
+        if (lastError) {
+            throw new Error(
+                `Component seed failed for ${failed.seed.input.designator}: ${(lastError as Error).message}`,
+            );
+        }
+    }
     return seededKeys;
 }
 
@@ -765,7 +801,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
         return records.some(item => item.outer.type === 'LINE' && item.inner?.lineGroup === id) &&
             records.some(item => item.outer.type === 'ATTR' && item.inner?.parentId === id && item.inner.key === 'NET');
     });
-    let seedIncluded = false;
+    let temporarySeedId: string | undefined;
     let templateApiSegment: WireSegment | undefined;
 
     if (wireTemplate) {
@@ -775,19 +811,35 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
         if (values) templateApiSegment = canonicalSegment(values.map(to2) as WireSegment);
     } else {
         const seedSpec = specs[0];
-        const seedWire = await sch_PrimitiveWireSnap.create(seedSpec.segments, seedSpec.net);
-        if (!seedWire) throw new Error(`Failed to create seed wire: ${seedSpec.description}`);
-        const committed = await seedWire.done();
-        const seedPrimitive = committed && typeof committed === 'object' ? committed as ISCH_PrimitiveWire : seedWire;
-        const seedId = seedPrimitive.getState_PrimitiveId();
-        if (!seedId) throw new Error('Seed wire primitive id is empty');
-        if (specs.length === 1) return 1;
-        seedIncluded = true;
-        templateApiSegment = seedSpec.segments[0];
+        const seedSegment = seedSpec.segments[0];
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= 4 && !temporarySeedId; attempt++) {
+            try {
+                const seedWire = await sch_PrimitiveWireSnap.create(seedSegment, seedSpec.net);
+                if (!seedWire) throw new Error('wire create returned undefined');
+                const committed = await seedWire.done();
+                const seedPrimitive = committed && typeof committed === 'object'
+                    ? committed as ISCH_PrimitiveWire
+                    : seedWire;
+                temporarySeedId = seedPrimitive.getState_PrimitiveId();
+                if (!temporarySeedId) throw new Error('seed wire primitive id is empty');
+            } catch (error) {
+                lastError = error;
+                eda.sys_Log.add(
+                    `[source-assemble] Simple wire seed attempt ${attempt} failed: ${(error as Error).message}`,
+                    ESYS_LogType.WARNING,
+                );
+                await new Promise<void>(resolve => setTimeout(resolve, attempt * 75));
+            }
+        }
+        if (!temporarySeedId) {
+            throw new Error(`Simple wire template seed failed: ${(lastError as Error)?.message ?? 'unknown error'}`);
+        }
+        templateApiSegment = seedSegment;
         source = await eda.sys_FileManager.getDocumentSource();
         if (!source) throw new Error('Document source is empty after seed wire placement');
         records = parseDocumentSource(source);
-        wireTemplate = records.find(record => record.outer.type === 'WIRE' && record.outer.id === seedId);
+        wireTemplate = records.find(record => record.outer.type === 'WIRE' && record.outer.id === temporarySeedId);
     }
 
     if (!wireTemplate?.inner) throw new Error('Bulk wire source template is incomplete');
@@ -802,7 +854,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
     let zIndex = getMaxZIndex(records);
     const appended: SourceRecord[] = [];
 
-    for (const spec of seedIncluded ? specs.slice(1) : specs) {
+    for (const spec of specs) {
         const wireId = makeSourceId();
         const wire = cloneSourceRecord(wireTemplate);
         wire.outer.id = wireId;
@@ -842,6 +894,14 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
         }
     }
 
+    if (temporarySeedId) {
+        const retained = records.filter(record =>
+            record.outer.id !== temporarySeedId &&
+            record.inner?.lineGroup !== temporarySeedId &&
+            record.inner?.parentId !== temporarySeedId,
+        );
+        source = serializeDocumentSource(retained);
+    }
     const nextSource = appendDocumentSource(source, appended);
     await setSourceAndRefresh(nextSource, 'bulk wire');
     return specs.length;
@@ -1574,6 +1634,7 @@ export async function assembleCircuitSourceTask(
             `${cachedVariants} cached (${pageCachedVariants} from page)`,
         );
 
+        eda.sys_Log.add('[source-assemble] Stage: component seeds', ESYS_LogType.INFO);
         const seededKeys = await placeSeeds(groups, projectUuid);
 
         source = await eda.sys_FileManager.getDocumentSource();
@@ -1588,6 +1649,7 @@ export async function assembleCircuitSourceTask(
             records = parseDocumentSource(source);
         }
 
+        eda.sys_Log.add('[source-assemble] Stage: load pins', ESYS_LogType.INFO);
         await loadPins(plans);
         const extraNets = [
             ...(circuit.added_net ?? []),
@@ -1595,9 +1657,12 @@ export async function assembleCircuitSourceTask(
             ...getUnusedPinNets(circuit, plans),
         ];
         const circuitWireSpecs = buildWireSpecs(circuit, plans, offset);
+        eda.sys_Log.add('[source-assemble] Stage: bulk net ports', ESYS_LogType.INFO);
         const attachmentResult = await bulkAddNetAttachments(extraNets, plans, projectUuid, circuitWireSpecs);
         const wireSpecs = normalizeWireSpecs([...circuitWireSpecs, ...attachmentResult.wireSpecs]);
+        eda.sys_Log.add('[source-assemble] Stage: bulk wires', ESYS_LogType.INFO);
         const wireCount = await bulkAddWires(wireSpecs);
+        eda.sys_Log.add('[source-assemble] Stage: short-symbol cleanup', ESYS_LogType.INFO);
         const removedShortSymbols = await removeUnusedShortSymbols();
         if (attachmentResult.unresolved) {
             eda.sys_Message.showToastMessage(
