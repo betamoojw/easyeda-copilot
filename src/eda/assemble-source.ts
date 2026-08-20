@@ -30,6 +30,23 @@ interface PlannedComponent {
     templateKey: string;
     primitiveId?: string;
     pins?: ISCH_PrimitiveComponentPin[];
+    replacement?: ReplacementContext;
+}
+
+interface ReplacementPinSnapshot {
+    pinNumber: string;
+    pinName: string;
+    x: number;
+    y: number;
+    nets: string[];
+}
+
+interface ReplacementContext {
+    oldPrimitiveId: string;
+    oldPins: ReplacementPinSnapshot[];
+    preservedAttributes: Map<string, unknown>;
+    shiftX: number;
+    shiftY: number;
 }
 
 interface ComponentTemplate {
@@ -239,7 +256,8 @@ async function createSeedComponent(plan: PlannedComponent): Promise<PrimitiveCom
 function planComponents(circuit: CircuitAssembly, offset: Offset): PlannedComponent[] {
     return circuit.components
         .filter(component => Boolean(component.part_uuid))
-        .map(input => {
+        .map(originalInput => {
+            const input = structuredClone(originalInput);
             const layout = getComponentLayoutPosition(input);
             const api = applyOffset(layout.x, layout.y, offset);
             return {
@@ -435,6 +453,10 @@ function updateInstanceAttribute(inner: Record<string, unknown>, plan: PlannedCo
     if (isNamedNetSymbol(plan.input) && (key === 'Name' || key === 'Global Net Name')) {
         inner.value = getSpecialSignalName(plan.input);
         inner.rotation = 0;
+    }
+
+    if (plan.replacement?.preservedAttributes.has(String(key))) {
+        inner.value = plan.replacement.preservedAttributes.get(String(key));
     }
 }
 
@@ -1095,6 +1117,237 @@ async function getOccupiedWireSegments(specs: WireSpec[]): Promise<OccupiedWireS
     return occupied;
 }
 
+const getReplacementDesignators = (circuit: CircuitAssembly) => new Set(
+    (circuit.replace_components ?? []).map(rmPartFromDesignator),
+);
+
+function createSourceWorkingCircuit(circuit: CircuitAssembly): CircuitAssembly {
+    const working = structuredClone(circuit);
+    const replacements = getReplacementDesignators(working);
+    if (!replacements.size) return working;
+
+    working.rm_components = working.rm_components?.filter(designator =>
+        !replacements.has(rmPartFromDesignator(designator)),
+    );
+    working.edges = working.edges.filter(edge => !(edge.sections ?? []).some(section => {
+        const incoming = splitPinShape(section.incomingShape);
+        const outgoing = splitPinShape(section.outgoingShape);
+        return (incoming && replacements.has(rmPartFromDesignator(incoming.designator))) ||
+            (outgoing && replacements.has(rmPartFromDesignator(outgoing.designator)));
+    }));
+    return working;
+}
+
+const getSubPartSuffix = (value?: string) => value?.split('.').at(-1)?.toLowerCase();
+
+async function bindReplacementPlans(
+    circuit: CircuitAssembly,
+    plans: PlannedComponent[],
+    source: string,
+): Promise<void> {
+    const replacements = getReplacementDesignators(circuit);
+    if (!replacements.size) return;
+
+    const records = parseDocumentSource(source);
+    const occupied = await getOccupiedWireSegments([]);
+    const attributesByParent = new Map<string, Map<string, unknown>>();
+    for (const record of records) {
+        if (record.outer.type !== 'ATTR' || !record.inner) continue;
+        const parentId = String(record.inner.parentId ?? '');
+        if (!parentId) continue;
+        const attributes = attributesByParent.get(parentId) ?? new Map<string, unknown>();
+        attributes.set(String(record.inner.key ?? ''), record.inner.value);
+        attributesByParent.set(parentId, attributes);
+    }
+
+    for (const designator of replacements) {
+        const targets = plans.filter(plan => rmPartFromDesignator(plan.input.designator) === designator);
+        if (!targets.length) throw new Error(`Replacement ${designator} is absent from circuit components`);
+        const primitives = await searchComponentInSCH(designator);
+        if (!primitives?.length) throw new Error(`Replacement target ${designator} is absent from schematic`);
+        const unused = new Set(primitives.map(primitive => primitive.primitiveId));
+
+        for (const plan of targets) {
+            const wantedSubPart = getSubPartSuffix(plan.input.sub_part_name) ??
+                getDesignatorPartIndex(plan.input)?.toString();
+            let target = primitives.find(primitive =>
+                unused.has(primitive.primitiveId) &&
+                wantedSubPart &&
+                getSubPartSuffix(primitive.component.getState_SubPartName?.()) === wantedSubPart,
+            );
+            if (!target && unused.size === 1) {
+                target = primitives.find(primitive => unused.has(primitive.primitiveId));
+            }
+            if (!target) {
+                throw new Error(`Cannot match replacement unit ${plan.input.designator} to existing ${designator}`);
+            }
+            unused.delete(target.primitiveId);
+
+            const oldPins = await getPrimitiveComponentPins(target.primitiveId);
+            if (!oldPins.length) throw new Error(`Replacement target ${plan.input.designator} has no readable pins`);
+            const oldPinSnapshots = oldPins.map(pin => {
+                const x = to2(pin.getState_X());
+                const y = to2(pin.getState_Y());
+                return {
+                    pinNumber: String(pin.getState_PinNumber()),
+                    pinName: pin.getState_PinName(),
+                    x,
+                    y,
+                    nets: [...new Set(occupied
+                        .filter(item => pointOnWireSegment(x, y, item.segment))
+                        .map(item => item.net)
+                        .filter(Boolean))],
+                };
+            });
+            const oldComponent = target.component;
+            plan.apiX = to2(oldComponent.getState_X());
+            plan.apiY = to2(oldComponent.getState_Y());
+            plan.input.pos.rotate = normalizeRotation(oldComponent.getState_Rotation());
+            plan.input.pos.mirror = Boolean(oldComponent.getState_Mirror());
+            const oldAttributes = attributesByParent.get(target.primitiveId) ?? new Map<string, unknown>();
+            const preservedAttributes = new Map<string, unknown>();
+            for (const key of ['Designator', 'Unique ID', 'Add into BOM', 'Convert to PCB']) {
+                if (oldAttributes.has(key)) preservedAttributes.set(key, oldAttributes.get(key));
+            }
+            plan.replacement = {
+                oldPrimitiveId: target.primitiveId,
+                oldPins: oldPinSnapshots,
+                preservedAttributes,
+                shiftX: 0,
+                shiftY: 0,
+            };
+            eda.sys_Log.add(
+                `[source-assemble] Replacement bound: ${plan.input.designator} <- ${target.primitiveId}`,
+                ESYS_LogType.INFO,
+            );
+        }
+    }
+}
+
+function validateSourceReplacements(
+    plans: PlannedComponent[],
+    occupied: OccupiedWireSegment[],
+): WireSpec[] {
+    const bridges: WireSpec[] = [];
+    for (const plan of plans.filter(item => item.replacement)) {
+        const replacement = plan.replacement!;
+        if (!plan.pins?.length) throw new Error(`Replacement pins not loaded for ${plan.input.designator}`);
+        if (plan.pins.length !== replacement.oldPins.length) {
+            throw new Error(
+                `Unsafe replacement ${plan.input.designator}: pin count ` +
+                `${replacement.oldPins.length} -> ${plan.pins.length}`,
+            );
+        }
+
+        const unusedOldPins = new Set(replacement.oldPins);
+        const pairs = plan.pins.map(newPin => {
+            const pinNumber = String(newPin.getState_PinNumber());
+            const pinName = newPin.getState_PinName();
+            const inputPin = plan.input.pins.find(pin => String(pin.pin_number) === pinNumber) ??
+                plan.input.pins.find(pin => pin.name === pinName);
+            const signal = inputPin?.signal_name ?? '';
+            const candidates = [...unusedOldPins];
+            const signalCandidates = signal ? candidates.filter(pin => pin.nets.includes(signal)) : [];
+            const oldPin = signalCandidates.find(pin => pin.pinNumber === pinNumber) ??
+                (signalCandidates.length === 1 ? signalCandidates[0] : undefined) ??
+                candidates.find(pin => pin.pinNumber === pinNumber) ??
+                candidates.find(pin => pin.pinName.toLowerCase() === pinName.toLowerCase());
+            if (!oldPin) {
+                throw new Error(
+                    `Unsafe replacement ${plan.input.designator}: cannot map pin ${pinNumber} (${pinName})`,
+                );
+            }
+            unusedOldPins.delete(oldPin);
+            return {
+                oldPin,
+                newX: to2(newPin.getState_X()),
+                newY: to2(newPin.getState_Y()),
+                net: signal || oldPin.nets[0] || '',
+            };
+        });
+
+        const deltaX = pairs.map(pair => to2(pair.oldPin.x - pair.newX));
+        const deltaY = pairs.map(pair => to2(pair.oldPin.y - pair.newY));
+        replacement.shiftX = deltaX.every(value => value === deltaX[0]) ? deltaX[0] : 0;
+        replacement.shiftY = deltaY.every(value => value === deltaY[0]) ? deltaY[0] : 0;
+
+        for (const pair of pairs) {
+            const targetX = to2(pair.newX + replacement.shiftX);
+            const targetY = to2(pair.newY + replacement.shiftY);
+            const residualX = to2(pair.oldPin.x - targetX);
+            const residualY = to2(pair.oldPin.y - targetY);
+            if (residualX && residualY) {
+                throw new Error(
+                    `Unsafe replacement ${plan.input.designator}.${pair.oldPin.pinNumber}: ` +
+                    `diagonal pin mismatch ${residualX},${residualY}`,
+                );
+            }
+            if (Math.abs(residualX) >= 30 || Math.abs(residualY) >= 30) {
+                throw new Error(
+                    `Unsafe replacement ${plan.input.designator}.${pair.oldPin.pinNumber}: ` +
+                    `pin mismatch ${residualX},${residualY}`,
+                );
+            }
+            if ((residualX || residualY) && pair.net) {
+                const targetConflict = occupied.some(item =>
+                    item.net !== pair.net && pointOnWireSegment(targetX, targetY, item.segment),
+                );
+                const bridge = canonicalSegment([pair.oldPin.x, pair.oldPin.y, targetX, targetY]);
+                const routeConflict = bridge && occupied.some(item =>
+                    item.net !== pair.net && wireSegmentsConflict(bridge, item.segment),
+                );
+                if (targetConflict || routeConflict) {
+                    throw new Error(
+                        `Unsafe replacement ${plan.input.designator}.${pair.oldPin.pinNumber}: ` +
+                        `bridge conflicts with another net`,
+                    );
+                }
+                bridges.push({
+                    segments: [[pair.oldPin.x, pair.oldPin.y, targetX, targetY]],
+                    net: pair.net,
+                    description: `replacement bridge ${plan.input.designator}.${pair.oldPin.pinNumber}`,
+                });
+            }
+        }
+    }
+    return bridges;
+}
+
+function applySourceReplacements(source: string, plans: PlannedComponent[]): string {
+    const replacementPlans = plans.filter(plan => plan.replacement);
+    if (!replacementPlans.length) return source;
+    const oldIds = new Set(replacementPlans.map(plan => plan.replacement!.oldPrimitiveId));
+    const records = parseDocumentSource(source).filter(record =>
+        !oldIds.has(String(record.outer.id ?? '')) &&
+        !oldIds.has(String(record.inner?.parentId ?? '')),
+    );
+
+    for (const plan of replacementPlans) {
+        const replacement = plan.replacement!;
+        const component = records.find(record =>
+            record.outer.type === 'COMPONENT' && record.outer.id === plan.primitiveId && record.inner,
+        );
+        if (!component?.inner) throw new Error(`New replacement source missing for ${plan.input.designator}`);
+        const sourceY = Number(component.inner.y);
+        const yFactor: 1 | -1 = Math.abs(sourceY - plan.apiY) <= Math.abs(sourceY + plan.apiY) ? 1 : -1;
+        component.inner.x = to2(Number(component.inner.x) + replacement.shiftX);
+        component.inner.y = to2(sourceY + replacement.shiftY * yFactor);
+        for (const record of records) {
+            if (record.outer.type !== 'ATTR' || !record.inner || record.inner.parentId !== plan.primitiveId) continue;
+            const inner = record.inner;
+            if (typeof inner.x === 'number') inner.x = to2(inner.x + replacement.shiftX);
+            if (typeof inner.y === 'number') inner.y = to2(inner.y + replacement.shiftY * yFactor);
+            const key = String(inner.key ?? '');
+            if (replacement.preservedAttributes.has(key)) {
+                inner.value = replacement.preservedAttributes.get(key);
+            }
+        }
+        plan.apiX = to2(plan.apiX + replacement.shiftX);
+        plan.apiY = to2(plan.apiY + replacement.shiftY);
+    }
+    return serializeDocumentSource(records);
+}
+
 async function bulkAddNetAttachments(
     nets: AddedNet[],
     plans: PlannedComponent[],
@@ -1686,7 +1939,6 @@ async function removeUnusedShortSymbols(): Promise<number> {
 
 function requiresLegacyAssembler(circuit: CircuitAssembly): string | undefined {
     if (VERSION_EDASYEDA[0] < 3) return 'EasyEDA editor version is older than v3';
-    if (circuit.replace_components?.length) return 'replace_components is requested';
     if (circuit.assembly_options?.draw_blocks) return 'draw_blocks is requested';
     return undefined;
 }
@@ -1723,11 +1975,12 @@ export async function assembleCircuitSourceTask(
     let detachedNets: AddedNet[] = [];
 
     try {
+        const workingCircuit = createSourceWorkingCircuit(circuit);
         const currentDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo();
         if (!currentDocument) throw new Error('Current schematic document info not found');
         const projectUuid = currentDocument.parentProjectUuid ?? currentDocument.uuid;
 
-        const removalPlan = await buildSourceRemovalPlan(circuit);
+        const removalPlan = await buildSourceRemovalPlan(workingCircuit);
         if (removalPlan.componentIds.size || removalPlan.points.length) {
             const currentSource = await eda.sys_FileManager.getDocumentSource();
             if (!currentSource) throw new Error('Document source is empty before source removals');
@@ -1739,12 +1992,13 @@ export async function assembleCircuitSourceTask(
             }
         }
 
-        const offset = await getAssemblyOffset(circuit);
-        const plans = planComponents(circuit, offset);
+        const offset = await getAssemblyOffset(workingCircuit);
+        const plans = planComponents(workingCircuit, offset);
         await resolveMultipartSubPartNames(plans);
-        const groups = groupPlans(plans);
         let source = await eda.sys_FileManager.getDocumentSource();
         if (!source) throw new Error('Document source is empty before component placement');
+        await bindReplacementPlans(workingCircuit, plans, source);
+        const groups = groupPlans(plans);
         let records = parseDocumentSource(source);
         const pageCachedVariants = await cacheTemplatesFromCurrentPage(groups, projectUuid, records);
         const cachedVariants = [...groups.keys()].filter(key =>
@@ -1772,12 +2026,31 @@ export async function assembleCircuitSourceTask(
 
         eda.sys_Log.add('[source-assemble] Stage: load pins', ESYS_LogType.INFO);
         await loadPins(plans);
+        const replacementOccupied = plans.some(plan => plan.replacement)
+            ? await getOccupiedWireSegments([])
+            : [];
+        const replacementBridges = validateSourceReplacements(plans, replacementOccupied);
+        if (plans.some(plan => plan.replacement)) {
+            source = await eda.sys_FileManager.getDocumentSource();
+            if (!source) throw new Error('Document source is empty before source replacements');
+            const replacedSource = applySourceReplacements(source, plans);
+            await setSourceAndRefresh(replacedSource, 'replace_components');
+            for (const plan of plans) plan.pins = undefined;
+            await loadPins(plans);
+            eda.sys_Log.add(
+                `[source-assemble] Replaced ${plans.filter(plan => plan.replacement).length} component units`,
+                ESYS_LogType.INFO,
+            );
+        }
         const extraNets = [
-            ...(circuit.added_net ?? []),
+            ...(workingCircuit.added_net ?? []),
             ...detachedNets,
-            ...getUnusedPinNets(circuit, plans),
+            ...getUnusedPinNets(workingCircuit, plans),
         ];
-        const circuitWireSpecs = buildWireSpecs(circuit, plans, offset);
+        const circuitWireSpecs = [
+            ...buildWireSpecs(workingCircuit, plans, offset),
+            ...replacementBridges,
+        ];
         eda.sys_Log.add('[source-assemble] Stage: bulk net ports', ESYS_LogType.INFO);
         const attachmentResult = await bulkAddNetAttachments(extraNets, plans, projectUuid, circuitWireSpecs);
         const wireSpecs = normalizeWireSpecs([...circuitWireSpecs, ...attachmentResult.wireSpecs]);
