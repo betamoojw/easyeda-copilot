@@ -1,7 +1,7 @@
 import { CircuitAssembly } from "@copilot/shared/types/circuit";
 import PQueue from "p-queue";
 import { searchFreePlaceV2 } from "./free-place-searcher";
-import { placeComponent } from "./place-component";
+import { getLibraryUuidList, placeComponent } from "./place-component";
 import { getAllPrimitivePins, getPrimitiveComponentPins, searchComponentInSCH } from "./search";
 import { AddedNet, ECHOSYS_LIB, GND_PORT_COMPONENT, NET_PORT_COMPONENT, Offset, shortSymbolsMap, VCC_PORT_COMPONENT } from "./types";
 import { getPageSize, normalizeWireLine, normWireY, rmPartFromDesignator, to2, VERSION_EDASYEDA, yieldToEventLoop } from "./utils";
@@ -92,6 +92,57 @@ const getComponentTemplateKey = (component: AssemblyComponent) => JSON.stringify
                     ? 'ECOSYSTEM_SHORT'
                     : 'DEVICE',
 });
+
+const getDesignatorPartIndex = (component: AssemblyComponent): number | undefined => {
+    const match = component.designator.trim().match(/\.(\d+)$/);
+    if (!match) return undefined;
+    const index = Number(match[1]);
+    return Number.isInteger(index) && index > 0 ? index : undefined;
+};
+
+async function resolveMultipartSubPartNames(plans: PlannedComponent[]): Promise<void> {
+    const unresolved = plans.filter(plan => !plan.input.sub_part_name && getDesignatorPartIndex(plan.input));
+    if (!unresolved.length) return;
+
+    const byPartUuid = new Map<string, PlannedComponent[]>();
+    for (const plan of unresolved) {
+        const partUuid = plan.input.part_uuid;
+        if (!partUuid || partUuid === 'GND' || partUuid === 'VCC') continue;
+        const group = byPartUuid.get(partUuid) ?? [];
+        group.push(plan);
+        byPartUuid.set(partUuid, group);
+    }
+
+    const libraryUuids = await getLibraryUuidList('lcsc');
+    for (const [partUuid, partPlans] of byPartUuid) {
+        let subPartNames: string[] = [];
+        for (const libraryUuid of libraryUuids) {
+            const device = await eda.lib_Device.get(partUuid, libraryUuid).catch(() => undefined);
+            const names = device?.subPartNames as unknown as string[] | undefined;
+            if (names?.length) {
+                subPartNames = names;
+                break;
+            }
+        }
+
+        for (const plan of partPlans) {
+            const index = getDesignatorPartIndex(plan.input)!;
+            const subPartName = subPartNames[index - 1];
+            if (!subPartName) {
+                throw new Error(
+                    `Cannot resolve multi-part ${plan.input.designator} for ${partUuid}; ` +
+                    `library returned ${subPartNames.length} sub-parts`,
+                );
+            }
+            plan.input.sub_part_name = subPartName;
+            plan.templateKey = getComponentTemplateKey(plan.input);
+            eda.sys_Log.add(
+                `[source-assemble] Multi-part ${plan.input.designator} -> ${subPartName}`,
+                ESYS_LogType.INFO,
+            );
+        }
+    }
+}
 
 async function createSeedComponent(plan: PlannedComponent): Promise<PrimitiveComponent> {
     const component = plan.input;
@@ -204,8 +255,10 @@ async function cacheTemplatesFromCurrentPage(
         const subPartName = primitive.getState_SubPartName?.() ?? '';
         const candidate = missing.find(([key, group]) =>
             !componentTemplateCache.has(getTemplateCacheKey(projectUuid, key)) &&
-            group[0].input.part_uuid === componentState.uuid &&
-            (group[0].input.sub_part_name ?? '') === subPartName,
+            (
+                (Boolean(group[0].input.sub_part_name) && group[0].input.sub_part_name === subPartName) ||
+                (group[0].input.part_uuid === componentState.uuid && !group[0].input.sub_part_name)
+            ),
         );
         if (!candidate) continue;
 
@@ -351,6 +404,7 @@ function updateInstanceAttribute(inner: Record<string, unknown>, plan: PlannedCo
 
     if (isNamedNetSymbol(plan.input) && (key === 'Name' || key === 'Global Net Name')) {
         inner.value = getSpecialSignalName(plan.input);
+        inner.rotation = 0;
     }
 }
 
@@ -1022,6 +1076,10 @@ async function bulkAddNetAttachments(
     const portPlans: PlannedComponent[] = [];
     const portWires: WireSpec[] = [];
     const handled = new Set<string>();
+    const netCountByDesignator = new Map<string, number>();
+    for (const net of nets) {
+        netCountByDesignator.set(net.designator, (netCountByDesignator.get(net.designator) ?? 0) + 1);
+    }
     let unresolved = 0;
 
     for (const net of nets) {
@@ -1100,35 +1158,38 @@ async function bulkAddNetAttachments(
             continue;
         }
 
-        const portData = selectPortForNet(net.net);
         const { endX, endY } = selected;
-        let portRotation = selected.direction[1] === normWireY(-1) ? 180 : 0;
-        if (portData.rotateToIdle === -1) portRotation += 180;
-        const input = {
-            designator: `${net.net}|${makeSourceId().slice(0, 6)}`,
-            value: 'bulk_net_port',
-            pins: [{ pin_number: 1, name: '', signal_name: net.net }],
-            block_name: '__bulk_net__',
-            search_query: net.net,
-            part_uuid: portData.uuid,
-            pos: {
-                x: endX,
-                y: normWireY(endY),
-                center: { x: 0, y: 0 },
-                width: 0,
-                height: 0,
-                rotate: normalizeRotation(portRotation),
-                mirror: false,
-            },
-        } as AssemblyComponent;
-        portPlans.push({
-            input,
-            layoutX: endX,
-            layoutY: normWireY(endY),
-            apiX: endX,
-            apiY: normWireY(endY),
-            templateKey: getComponentTemplateKey(input),
-        });
+        const makePort = (netCountByDesignator.get(net.designator) ?? 0) < 5;
+        if (makePort) {
+            const portData = selectPortForNet(net.net);
+            let portRotation = selected.direction[1] === normWireY(-1) ? 180 : 0;
+            if (portData.rotateToIdle === -1) portRotation += 180;
+            const input = {
+                designator: `${net.net}|${makeSourceId().slice(0, 6)}`,
+                value: 'bulk_net_port',
+                pins: [{ pin_number: 1, name: '', signal_name: net.net }],
+                block_name: '__bulk_net__',
+                search_query: net.net,
+                part_uuid: portData.uuid,
+                pos: {
+                    x: endX,
+                    y: normWireY(endY),
+                    center: { x: 0, y: 0 },
+                    width: 0,
+                    height: 0,
+                    rotate: normalizeRotation(portRotation),
+                    mirror: false,
+                },
+            } as AssemblyComponent;
+            portPlans.push({
+                input,
+                layoutX: endX,
+                layoutY: normWireY(endY),
+                apiX: endX,
+                apiY: normWireY(endY),
+                templateKey: getComponentTemplateKey(input),
+            });
+        }
         const wireSpec = { segments: [selected.segment], net: net.net, description: `bulk port ${net.designator}.${net.pin_number}` };
         portWires.push(wireSpec);
         occupied.push({ net: net.net, segment: selected.canonical });
@@ -1621,6 +1682,7 @@ export async function assembleCircuitSourceTask(
 
         const offset = await getAssemblyOffset(circuit);
         const plans = planComponents(circuit, offset);
+        await resolveMultipartSubPartNames(plans);
         const groups = groupPlans(plans);
         let source = await eda.sys_FileManager.getDocumentSource();
         if (!source) throw new Error('Document source is empty before component placement');
