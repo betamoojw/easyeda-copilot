@@ -1,10 +1,10 @@
 import { CircuitAssembly } from "@copilot/shared/types/circuit";
+import PQueue from "p-queue";
 import { searchFreePlaceV2 } from "./free-place-searcher";
 import { placeComponent } from "./place-component";
-import { placeNet } from "./place-net";
 import { getAllPrimitivePins, getPrimitiveComponentPins, searchComponentInSCH } from "./search";
-import { AddedNet, ECHOSYS_LIB, GND_PORT_COMPONENT, Offset, PlacedComponents, VCC_PORT_COMPONENT } from "./types";
-import { getPageSize, normWireY, rmPartFromDesignator, to2, VERSION_EDASYEDA, yieldToEventLoop } from "./utils";
+import { AddedNet, ECHOSYS_LIB, GND_PORT_COMPONENT, NET_PORT_COMPONENT, Offset, shortSymbolsMap, VCC_PORT_COMPONENT } from "./types";
+import { getPageSize, normalizeWireLine, normWireY, rmPartFromDesignator, to2, VERSION_EDASYEDA, yieldToEventLoop } from "./utils";
 import { sch_PrimitiveWireSnap } from "./wire-snap";
 import {
     appendDocumentSource,
@@ -238,15 +238,15 @@ async function placeSeeds(
     projectUuid: string,
 ): Promise<Set<string>> {
     const seededKeys = new Set<string>();
-    for (const [key, group] of groups) {
-        if (componentTemplateCache.has(getTemplateCacheKey(projectUuid, key))) continue;
+    const placementQueue = new PQueue({ concurrency: 5 });
+    await placementQueue.addAll([...groups.entries()].map(([key, group]) => async () => {
+        if (componentTemplateCache.has(getTemplateCacheKey(projectUuid, key))) return;
         const seed = group[0];
         const primitive = await createSeedComponent(seed);
         seed.primitiveId = primitive.getState_PrimitiveId();
         seededKeys.add(key);
         eda.sys_Log.add(`[source-assemble] Seed ${seed.input.designator}: ${seed.primitiveId}`);
-        await yieldToEventLoop();
-    }
+    }));
     return seededKeys;
 }
 
@@ -756,31 +756,53 @@ function scoreWireYTransform(
 async function bulkAddWires(specs: WireSpec[]): Promise<number> {
     if (!specs.length) return 0;
 
-    const seedSpec = specs[0];
-    const seedWire = await sch_PrimitiveWireSnap.create(seedSpec.segments, seedSpec.net);
-    if (!seedWire) throw new Error(`Failed to create seed wire: ${seedSpec.description}`);
-    const committed = await seedWire.done();
-    const seedPrimitive = committed && typeof committed === 'object' ? committed as ISCH_PrimitiveWire : seedWire;
-    const seedId = seedPrimitive.getState_PrimitiveId();
-    if (!seedId) throw new Error('Seed wire primitive id is empty');
-    if (specs.length === 1) return 1;
+    let source = await eda.sys_FileManager.getDocumentSource();
+    if (!source) throw new Error('Document source is empty before bulk wires');
+    let records = parseDocumentSource(source);
+    let wireTemplate = records.find(record => {
+        if (record.outer.type !== 'WIRE' || !record.inner) return false;
+        const id = String(record.outer.id ?? '');
+        return records.some(item => item.outer.type === 'LINE' && item.inner?.lineGroup === id) &&
+            records.some(item => item.outer.type === 'ATTR' && item.inner?.parentId === id && item.inner.key === 'NET');
+    });
+    let seedIncluded = false;
+    let templateApiSegment: WireSegment | undefined;
 
-    const source = await eda.sys_FileManager.getDocumentSource();
-    if (!source) throw new Error('Document source is empty after seed wire placement');
-    const records = parseDocumentSource(source);
-    const wireTemplate = records.find(record => record.outer.type === 'WIRE' && record.outer.id === seedId);
-    const lineTemplates = records.filter(record => record.outer.type === 'LINE' && record.inner?.lineGroup === seedId);
-    const attributeTemplates = records.filter(record => record.outer.type === 'ATTR' && record.inner?.parentId === seedId);
-    if (!wireTemplate?.inner || !lineTemplates[0]?.inner) throw new Error('Seed wire source template is incomplete');
+    if (wireTemplate) {
+        const templateId = String(wireTemplate.outer.id);
+        const templatePrimitive = await sch_PrimitiveWireSnap.get(templateId).catch(() => undefined);
+        const values = templatePrimitive ? normalizeWireLine(templatePrimitive.getState_Line())[0] : undefined;
+        if (values) templateApiSegment = canonicalSegment(values.map(to2) as WireSegment);
+    } else {
+        const seedSpec = specs[0];
+        const seedWire = await sch_PrimitiveWireSnap.create(seedSpec.segments, seedSpec.net);
+        if (!seedWire) throw new Error(`Failed to create seed wire: ${seedSpec.description}`);
+        const committed = await seedWire.done();
+        const seedPrimitive = committed && typeof committed === 'object' ? committed as ISCH_PrimitiveWire : seedWire;
+        const seedId = seedPrimitive.getState_PrimitiveId();
+        if (!seedId) throw new Error('Seed wire primitive id is empty');
+        if (specs.length === 1) return 1;
+        seedIncluded = true;
+        templateApiSegment = seedSpec.segments[0];
+        source = await eda.sys_FileManager.getDocumentSource();
+        if (!source) throw new Error('Document source is empty after seed wire placement');
+        records = parseDocumentSource(source);
+        wireTemplate = records.find(record => record.outer.type === 'WIRE' && record.outer.id === seedId);
+    }
 
-    const firstSegment = seedSpec.segments[0];
+    if (!wireTemplate?.inner) throw new Error('Bulk wire source template is incomplete');
+    const templateId = String(wireTemplate.outer.id);
+    const lineTemplates = records.filter(record => record.outer.type === 'LINE' && record.inner?.lineGroup === templateId);
+    const attributeTemplates = records.filter(record => record.outer.type === 'ATTR' && record.inner?.parentId === templateId);
+    if (!lineTemplates[0]?.inner) throw new Error('Bulk wire LINE template is missing');
+    const firstSegment = templateApiSegment ?? specs[0].segments[0];
     const yFactor: 1 | -1 = scoreWireYTransform(lineTemplates[0].inner, firstSegment, 1) <=
         scoreWireYTransform(lineTemplates[0].inner, firstSegment, -1) ? 1 : -1;
     let ticket = getMaxTicket(records);
     let zIndex = getMaxZIndex(records);
     const appended: SourceRecord[] = [];
 
-    for (const spec of specs.slice(1)) {
+    for (const spec of seedIncluded ? specs.slice(1) : specs) {
         const wireId = makeSourceId();
         const wire = cloneSourceRecord(wireTemplate);
         wire.outer.id = wireId;
@@ -825,14 +847,6 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
     return specs.length;
 }
 
-function toPlacedComponents(plans: PlannedComponent[]): PlacedComponents {
-    return Object.fromEntries(plans.map(plan => [plan.input.designator, {
-        primitive_id: plan.primitiveId!,
-        pins: plan.pins!,
-        designator: plan.input.designator,
-    }]));
-}
-
 function getUnusedPinNets(circuit: CircuitAssembly, plans: PlannedComponent[]) {
     const usedPins = new Set<string>();
     for (const edge of circuit.edges) {
@@ -842,15 +856,244 @@ function getUnusedPinNets(circuit: CircuitAssembly, plans: PlannedComponent[]) {
         }
     }
 
+    const usedCoordinates = new Set<string>();
+    for (const pinId of usedPins) {
+        const ref = splitPinShape(pinId);
+        if (!ref) continue;
+        const plan = findPlan(plans, ref.designator, ref.pinNumber);
+        const pin = findPlanPin(plan, ref.pinNumber);
+        if (pin) usedCoordinates.add(coordinateKey(pin.getState_X(), pin.getState_Y()));
+    }
+
     return plans.flatMap(plan => plan.input.pins
         .filter(pin => pin.signal_name && pin.signal_name.toLowerCase().trim() !== 'nc')
         .filter(pin => !usedPins.has(`${plan.input.designator}_pin_${pin.pin_number}`))
+        .filter(pin => {
+            const placedPin = findPlanPin(plan, String(pin.pin_number));
+            return !placedPin || !usedCoordinates.has(coordinateKey(placedPin.getState_X(), placedPin.getState_Y()));
+        })
         .map(pin => ({
             designator: plan.input.designator,
             pin_number: pin.pin_number,
             pin_name: pin.name,
             net: pin.signal_name,
         })));
+}
+
+interface ResolvedNetPin {
+    pin: ISCH_PrimitiveComponentPin;
+    pins: ISCH_PrimitiveComponentPin[];
+}
+
+interface OccupiedWireSegment {
+    net: string;
+    segment: WireSegment;
+}
+
+const selectPortForNet = (net: string) => {
+    const type = (Object.keys(shortSymbolsMap) as Array<keyof typeof shortSymbolsMap>)
+        .find(key => shortSymbolsMap[key].is(net));
+    return type ? shortSymbolsMap[type].data : NET_PORT_COMPONENT;
+};
+
+async function resolveNetPin(net: AddedNet, plans: PlannedComponent[]): Promise<ResolvedNetPin | undefined> {
+    const plan = findPlan(plans, net.designator, String(net.pin_number));
+    if (plan?.pins?.length) {
+        const pin = plan.pins.find(item => item.getState_PinNumber() == net.pin_number) ??
+            plan.pins.find(item => net.pin_name && item.getState_PinName() === net.pin_name);
+        if (pin) return { pin, pins: plan.pins };
+    }
+
+    const components = await searchComponentInSCH(net.designator).catch(() => undefined);
+    for (const component of components ?? []) {
+        const pins = await getPrimitiveComponentPins(component.primitiveId).catch(() => []);
+        const pin = pins.find(item => item.getState_PinNumber() == net.pin_number) ??
+            pins.find(item => net.pin_name && item.getState_PinName() === net.pin_name);
+        if (pin) return { pin, pins };
+    }
+    return undefined;
+}
+
+function pointIsWireEndpoint(x: number, y: number, segment: WireSegment): boolean {
+    return coordinateKey(x, y) === coordinateKey(segment[0], segment[1]) ||
+        coordinateKey(x, y) === coordinateKey(segment[2], segment[3]);
+}
+
+function wireSegmentsConflict(left: WireSegment, right: WireSegment): boolean {
+    const leftHorizontal = left[1] === left[3];
+    const rightHorizontal = right[1] === right[3];
+    if (leftHorizontal && rightHorizontal) {
+        if (left[1] !== right[1]) return false;
+        return Math.min(left[2], right[2]) > Math.max(left[0], right[0]);
+    }
+    if (!leftHorizontal && !rightHorizontal) {
+        if (left[0] !== right[0]) return false;
+        return Math.min(left[3], right[3]) > Math.max(left[1], right[1]);
+    }
+
+    const horizontal = leftHorizontal ? left : right;
+    const vertical = leftHorizontal ? right : left;
+    const x = vertical[0];
+    const y = horizontal[1];
+    if (!pointOnWireSegment(x, y, horizontal) || !pointOnWireSegment(x, y, vertical)) return false;
+    return pointIsWireEndpoint(x, y, left) || pointIsWireEndpoint(x, y, right);
+}
+
+async function getOccupiedWireSegments(specs: WireSpec[]): Promise<OccupiedWireSegment[]> {
+    const occupied = specs.flatMap(spec => spec.segments.map(segment => ({ net: spec.net, segment })));
+    const wires = await sch_PrimitiveWireSnap.getAll().catch(() => [] as ISCH_PrimitiveWire[]);
+    for (const wire of wires) {
+        for (const values of normalizeWireLine(wire.getState_Line())) {
+            const segment = canonicalSegment(values.map(to2) as WireSegment);
+            if (segment) occupied.push({ net: wire.getState_Net(), segment });
+        }
+    }
+    return occupied;
+}
+
+async function bulkAddNetAttachments(
+    nets: AddedNet[],
+    plans: PlannedComponent[],
+    projectUuid: string,
+    circuitWireSpecs: WireSpec[],
+): Promise<{ wireSpecs: WireSpec[]; portCount: number; unresolved: number; apiSeeds: number }> {
+    if (!nets.length) return { wireSpecs: [], portCount: 0, unresolved: 0, apiSeeds: 0 };
+    const occupied = await getOccupiedWireSegments(circuitWireSpecs);
+    const portPlans: PlannedComponent[] = [];
+    const portWires: WireSpec[] = [];
+    const handled = new Set<string>();
+    let unresolved = 0;
+
+    for (const net of nets) {
+        const resolved = await resolveNetPin(net, plans);
+        if (!resolved) {
+            unresolved++;
+            eda.sys_Log.add(
+                `[source-assemble] added_net pin not found: ${net.designator} ${net.pin_number}`,
+                ESYS_LogType.WARNING,
+            );
+            continue;
+        }
+
+        const pinX = to2(resolved.pin.getState_X());
+        const pinY = to2(resolved.pin.getState_Y());
+        const attachmentKey = `${coordinateKey(pinX, pinY)}:${net.net}`;
+        if (handled.has(attachmentKey)) continue;
+        handled.add(attachmentKey);
+
+        if (occupied.some(item => item.net === net.net && pointOnWireSegment(pinX, pinY, item.segment))) {
+            continue;
+        }
+        if (occupied.some(item => item.net !== net.net && pointOnWireSegment(pinX, pinY, item.segment))) {
+            unresolved++;
+            eda.sys_Log.add(
+                `[source-assemble] added_net conflict at ${net.designator}.${net.pin_number}: ${net.net}`,
+                ESYS_LogType.WARNING,
+            );
+            continue;
+        }
+
+        const rotation = normalizeRotation(resolved.pin.getState_Rotation());
+        const primaryDirection = rotation >= 270 ? 3 : rotation >= 180 ? 2 : rotation >= 90 ? 1 : 0;
+        const directions: Array<[number, number]> = [[1, 0], [0, normWireY(1)], [-1, 0], [0, normWireY(-1)]];
+        const directionOrder = [primaryDirection, ...[0, 1, 2, 3].filter(index => index !== primaryDirection)];
+        const lengths = [20, 30, 40, 50, 60, 80, 100, 120, 160, 200, 10, 5];
+        let selected: {
+            segment: WireSegment;
+            canonical: WireSegment;
+            direction: [number, number];
+            endX: number;
+            endY: number;
+        } | undefined;
+
+        for (const directionIndex of directionOrder) {
+            const direction = directions[directionIndex];
+            for (const length of lengths) {
+                const directed: WireSegment = [
+                    pinX,
+                    pinY,
+                    pinX + direction[0] * length,
+                    pinY + direction[1] * length,
+                ];
+                const candidate = canonicalSegment(directed);
+                if (!candidate) continue;
+                const endX = pinX + direction[0] * length;
+                const endY = pinY + direction[1] * length;
+                const hitsPin = resolved.pins.some(pin =>
+                    pin !== resolved.pin && coordinateKey(pin.getState_X(), pin.getState_Y()) === coordinateKey(endX, endY),
+                );
+                const conflicts = occupied.some(item => item.net !== net.net && wireSegmentsConflict(candidate, item.segment));
+                if (!hitsPin && !conflicts) {
+                    selected = { segment: directed, canonical: candidate, direction, endX, endY };
+                    break;
+                }
+            }
+            if (selected) break;
+        }
+
+        if (!selected) {
+            unresolved++;
+            eda.sys_Log.add(
+                `[source-assemble] No free bulk net-port route: ${net.net} at ${net.designator}.${net.pin_number}`,
+                ESYS_LogType.WARNING,
+            );
+            continue;
+        }
+
+        const portData = selectPortForNet(net.net);
+        const { endX, endY } = selected;
+        let portRotation = selected.direction[1] === normWireY(-1) ? 180 : 0;
+        if (portData.rotateToIdle === -1) portRotation += 180;
+        const input = {
+            designator: `${net.net}|${makeSourceId().slice(0, 6)}`,
+            value: 'bulk_net_port',
+            pins: [{ pin_number: 1, name: '', signal_name: net.net }],
+            block_name: '__bulk_net__',
+            search_query: net.net,
+            part_uuid: portData.uuid,
+            pos: {
+                x: endX,
+                y: normWireY(endY),
+                center: { x: 0, y: 0 },
+                width: 0,
+                height: 0,
+                rotate: normalizeRotation(portRotation),
+                mirror: false,
+            },
+        } as AssemblyComponent;
+        portPlans.push({
+            input,
+            layoutX: endX,
+            layoutY: normWireY(endY),
+            apiX: endX,
+            apiY: normWireY(endY),
+            templateKey: getComponentTemplateKey(input),
+        });
+        const wireSpec = { segments: [selected.segment], net: net.net, description: `bulk port ${net.designator}.${net.pin_number}` };
+        portWires.push(wireSpec);
+        occupied.push({ net: net.net, segment: selected.canonical });
+    }
+
+    if (!portPlans.length) return { wireSpecs: portWires, portCount: 0, unresolved, apiSeeds: 0 };
+    const groups = groupPlans(portPlans);
+    let source = await eda.sys_FileManager.getDocumentSource();
+    if (!source) throw new Error('Document source is empty before bulk net ports');
+    let records = parseDocumentSource(source);
+    await cacheTemplatesFromCurrentPage(groups, projectUuid, records);
+    const seededKeys = await placeSeeds(groups, projectUuid);
+    source = await eda.sys_FileManager.getDocumentSource();
+    if (!source) throw new Error('Document source is empty after net-port seeds');
+    records = parseDocumentSource(source);
+    const templates = collectComponentTemplates(records, groups, projectUuid, seededKeys);
+    const result = cloneComponentsIntoSource(source, records, groups, templates);
+    if (result.addedCount) await setSourceAndRefresh(result.source, 'bulk net ports');
+
+    return {
+        wireSpecs: portWires,
+        portCount: portPlans.length,
+        unresolved,
+        apiSeeds: seededKeys.size,
+    };
 }
 
 interface SourceRemovalPoint {
@@ -1212,6 +1455,55 @@ async function setSourceAndRefresh(source: string, label: string): Promise<void>
     await refreshSchematicIndexes();
 }
 
+async function removeUnusedShortSymbols(): Promise<number> {
+    const primitives = await eda.sch_PrimitiveComponent.getAll().catch(() => []);
+    const shortSymbols = primitives.filter(primitive => {
+        const type = primitive.getState_ComponentType();
+        return type === ESCH_PrimitiveComponentType.NET_FLAG ||
+            type === ESCH_PrimitiveComponentType.NET_PORT ||
+            type === ESCH_PrimitiveComponentType.SHORT_CIRCUIT_FLAG;
+    });
+    if (!shortSymbols.length) return 0;
+
+    const source = await eda.sys_FileManager.getDocumentSource();
+    if (!source) return 0;
+    const records = parseDocumentSource(source);
+    const wireNets = new Map<string, string>();
+    for (const record of records) {
+        if (record.outer.type === 'ATTR' && record.inner?.key === 'NET') {
+            wireNets.set(String(record.inner.parentId ?? ''), String(record.inner.value ?? ''));
+        }
+    }
+    const lines = records.filter(record => sourceLineSegment(record));
+    const removeIds = new Set<string>();
+
+    for (const symbol of shortSymbols) {
+        const symbolId = symbol.getState_PrimitiveId();
+        const net = symbol.getState_Net?.() || String(symbol.getState_OtherProperty?.()?.['Global Net Name'] ?? '');
+        const pins = await getPrimitiveComponentPins(symbolId).catch(() => []);
+        const points = pins.length
+            ? pins.map(pin => [to2(pin.getState_X()), to2(pin.getState_Y())] as [number, number])
+            : [[to2(symbol.getState_X()), to2(normWireY(symbol.getState_Y()))] as [number, number]];
+        const connected = points.some(([x, y]) => lines.some(record => {
+            const wireId = String(record.inner?.lineGroup ?? '');
+            const wireNet = wireNets.get(wireId) ?? '';
+            if (net && wireNet && net !== wireNet) return false;
+            const segment = sourceLineSegment(record)!;
+            return pointOnWireSegment(x, y, segment) || pointOnWireSegment(x, -y, segment);
+        }));
+        if (!connected) removeIds.add(symbolId);
+    }
+
+    if (!removeIds.size) return 0;
+    const filtered = records.filter(record => {
+        const id = String(record.outer.id ?? '');
+        const parentId = String(record.inner?.parentId ?? '');
+        return !removeIds.has(id) && !removeIds.has(parentId);
+    });
+    await setSourceAndRefresh(serializeDocumentSource(filtered), 'unused short-symbol cleanup');
+    return removeIds.size;
+}
+
 function requiresLegacyAssembler(circuit: CircuitAssembly): string | undefined {
     if (VERSION_EDASYEDA[0] < 3) return 'EasyEDA editor version is older than v3';
     if (circuit.replace_components?.length) return 'replace_components is requested';
@@ -1297,16 +1589,22 @@ export async function assembleCircuitSourceTask(
         }
 
         await loadPins(plans);
-        const wireSpecs = buildWireSpecs(circuit, plans, offset);
-        const wireCount = await bulkAddWires(wireSpecs);
-
-        const placedComponents = toPlacedComponents(plans);
         const extraNets = [
             ...(circuit.added_net ?? []),
             ...detachedNets,
             ...getUnusedPinNets(circuit, plans),
         ];
-        if (extraNets.length) await placeNet(extraNets, placedComponents, true);
+        const circuitWireSpecs = buildWireSpecs(circuit, plans, offset);
+        const attachmentResult = await bulkAddNetAttachments(extraNets, plans, projectUuid, circuitWireSpecs);
+        const wireSpecs = normalizeWireSpecs([...circuitWireSpecs, ...attachmentResult.wireSpecs]);
+        const wireCount = await bulkAddWires(wireSpecs);
+        const removedShortSymbols = await removeUnusedShortSymbols();
+        if (attachmentResult.unresolved) {
+            eda.sys_Message.showToastMessage(
+                `${attachmentResult.unresolved} net ports could not be placed; see source-assemble log.`,
+                ESYS_ToastMessageType.WARNING,
+            );
+        }
 
         const saved = await eda.sch_Document.save();
         if (!saved) throw new Error('Failed to save source-assembled schematic');
@@ -1314,7 +1612,9 @@ export async function assembleCircuitSourceTask(
         const duration = Date.now() - startedAt;
         eda.sys_Log.add(
             `[source-assemble] Complete in ${duration}ms: ${plans.length} components ` +
-            `(${seededKeys.size} API seeds), ${wireCount} wires`,
+            `(${seededKeys.size + attachmentResult.apiSeeds} API seeds), ${wireCount} wires, ` +
+            `${attachmentResult.portCount} bulk ports, ${removedShortSymbols} unused short symbols removed, ` +
+            `${attachmentResult.unresolved} unresolved ports`,
             ESYS_LogType.INFO,
         );
         eda.sys_Message.showToastMessage('Assemble complete.', ESYS_ToastMessageType.SUCCESS);
