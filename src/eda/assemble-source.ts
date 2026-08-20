@@ -2,8 +2,8 @@ import { CircuitAssembly } from "@copilot/shared/types/circuit";
 import { searchFreePlaceV2 } from "./free-place-searcher";
 import { placeComponent } from "./place-component";
 import { placeNet } from "./place-net";
-import { getPrimitiveComponentPins } from "./search";
-import { ECHOSYS_LIB, GND_PORT_COMPONENT, Offset, PlacedComponents, VCC_PORT_COMPONENT } from "./types";
+import { getAllPrimitivePins, getPrimitiveComponentPins, searchComponentInSCH } from "./search";
+import { AddedNet, ECHOSYS_LIB, GND_PORT_COMPONENT, Offset, PlacedComponents, VCC_PORT_COMPONENT } from "./types";
 import { getPageSize, normWireY, rmPartFromDesignator, to2, VERSION_EDASYEDA, yieldToEventLoop } from "./utils";
 import { sch_PrimitiveWireSnap } from "./wire-snap";
 import {
@@ -13,11 +13,11 @@ import {
     getMaxZIndex,
     makeSourceId,
     parseDocumentSource,
+    serializeDocumentSource,
     SourceRecord,
 } from "./source-document";
 
 type AssemblyComponent = CircuitAssembly['components'][number];
-type AssemblyEdge = CircuitAssembly['edges'][number];
 type PrimitiveComponent = ISCH_PrimitiveComponent | ISCH_PrimitiveComponent$1;
 type LegacyAssembler = (circuit: CircuitAssembly) => Promise<void>;
 
@@ -33,16 +33,31 @@ interface PlannedComponent {
 }
 
 interface ComponentTemplate {
-    seed: PlannedComponent;
+    originApiX: number;
+    originApiY: number;
+    firstPlanSeeded: boolean;
     component: SourceRecord;
     attributes: SourceRecord[];
 }
 
 interface WireSpec {
-    values: number[];
+    segments: WireSegment[];
     net: string;
     description: string;
 }
+
+type WireSegment = [number, number, number, number];
+
+interface CachedComponentTemplate {
+    projectUuid: string;
+    templateKey: string;
+    seedApiX: number;
+    seedApiY: number;
+    component: SourceRecord;
+    attributes: SourceRecord[];
+}
+
+const componentTemplateCache = new Map<string, CachedComponentTemplate>();
 
 const applyOffset = (x: number, y: number, offset: Offset) => {
     if (offset.x) x += offset.x;
@@ -67,8 +82,6 @@ const isNamedNetSymbol = (component: AssemblyComponent) =>
 const getComponentTemplateKey = (component: AssemblyComponent) => JSON.stringify({
     partUuid: component.part_uuid,
     subPartName: component.sub_part_name ?? '',
-    rotation: component.pos.rotate ?? 0,
-    mirror: component.pos.mirror ?? false,
     kind: component.part_uuid === 'GND'
         ? 'GND'
         : component.part_uuid === 'VCC'
@@ -169,23 +182,95 @@ function groupPlans(plans: PlannedComponent[]): Map<string, PlannedComponent[]> 
     return groups;
 }
 
-async function placeSeeds(groups: Map<string, PlannedComponent[]>): Promise<void> {
-    for (const group of groups.values()) {
+const getTemplateCacheKey = (projectUuid: string, templateKey: string) => `${projectUuid}:${templateKey}`;
+
+async function cacheTemplatesFromCurrentPage(
+    groups: Map<string, PlannedComponent[]>,
+    projectUuid: string,
+    records: SourceRecord[],
+): Promise<number> {
+    const missing = [...groups.entries()].filter(([key, group]) =>
+        !componentTemplateCache.has(getTemplateCacheKey(projectUuid, key)) &&
+        group[0].input.part_uuid !== 'GND' &&
+        group[0].input.part_uuid !== 'VCC',
+    );
+    if (!missing.length) return 0;
+
+    const primitives = await eda.sch_PrimitiveComponent.getAll().catch(() => []);
+    let cached = 0;
+    for (const primitive of primitives) {
+        const componentState = primitive.getState_Component?.();
+        if (!componentState?.uuid) continue;
+        const subPartName = primitive.getState_SubPartName?.() ?? '';
+        const candidate = missing.find(([key, group]) =>
+            !componentTemplateCache.has(getTemplateCacheKey(projectUuid, key)) &&
+            group[0].input.part_uuid === componentState.uuid &&
+            (group[0].input.sub_part_name ?? '') === subPartName,
+        );
+        if (!candidate) continue;
+
+        const [templateKey] = candidate;
+        const primitiveId = primitive.getState_PrimitiveId();
+        const component = records.find(record =>
+            record.outer.type === 'COMPONENT' && record.outer.id === primitiveId && record.inner,
+        );
+        if (!component) continue;
+        const attributes = records.filter(record =>
+            record.outer.type === 'ATTR' && record.inner?.parentId === primitiveId,
+        );
+        if (!attributes.length) continue;
+
+        componentTemplateCache.set(getTemplateCacheKey(projectUuid, templateKey), {
+            projectUuid,
+            templateKey,
+            seedApiX: to2(primitive.getState_X()),
+            seedApiY: to2(primitive.getState_Y()),
+            component: cloneSourceRecord(component),
+            attributes: attributes.map(cloneSourceRecord),
+        });
+        cached++;
+    }
+    return cached;
+}
+
+async function placeSeeds(
+    groups: Map<string, PlannedComponent[]>,
+    projectUuid: string,
+): Promise<Set<string>> {
+    const seededKeys = new Set<string>();
+    for (const [key, group] of groups) {
+        if (componentTemplateCache.has(getTemplateCacheKey(projectUuid, key))) continue;
         const seed = group[0];
         const primitive = await createSeedComponent(seed);
         seed.primitiveId = primitive.getState_PrimitiveId();
+        seededKeys.add(key);
         eda.sys_Log.add(`[source-assemble] Seed ${seed.input.designator}: ${seed.primitiveId}`);
         await yieldToEventLoop();
     }
+    return seededKeys;
 }
 
 function collectComponentTemplates(
     records: SourceRecord[],
     groups: Map<string, PlannedComponent[]>,
+    projectUuid: string,
+    seededKeys: Set<string>,
 ): Map<string, ComponentTemplate> {
     const templates = new Map<string, ComponentTemplate>();
 
     for (const [key, group] of groups) {
+        const cached = componentTemplateCache.get(getTemplateCacheKey(projectUuid, key));
+        if (cached && !seededKeys.has(key)) {
+            templates.set(key, {
+                originApiX: cached.seedApiX,
+                originApiY: cached.seedApiY,
+                firstPlanSeeded: false,
+                component: cloneSourceRecord(cached.component),
+                attributes: cached.attributes.map(cloneSourceRecord),
+            });
+            continue;
+        }
+
         const seed = group[0];
         if (!seed.primitiveId) throw new Error(`Seed primitive id missing for ${seed.input.designator}`);
 
@@ -199,7 +284,22 @@ function collectComponentTemplates(
         );
         if (!attributes.length) throw new Error(`Source ATTR records not found for ${seed.input.designator}`);
 
-        templates.set(key, { seed, component, attributes });
+        const template: ComponentTemplate = {
+            originApiX: seed.apiX,
+            originApiY: seed.apiY,
+            firstPlanSeeded: true,
+            component,
+            attributes,
+        };
+        templates.set(key, template);
+        componentTemplateCache.set(getTemplateCacheKey(projectUuid, key), {
+            projectUuid,
+            templateKey: key,
+            seedApiX: seed.apiX,
+            seedApiY: seed.apiY,
+            component: cloneSourceRecord(component),
+            attributes: attributes.map(cloneSourceRecord),
+        });
     }
 
     return templates;
@@ -218,6 +318,37 @@ function updateInstanceAttribute(inner: Record<string, unknown>, plan: PlannedCo
     }
 }
 
+const normalizeRotation = (rotation: number) => ((rotation % 360) + 360) % 360;
+
+function rotateVector(x: number, y: number, rotation: number): { x: number; y: number } {
+    const radians = normalizeRotation(rotation) * Math.PI / 180;
+    const cosine = Math.cos(radians);
+    const sine = Math.sin(radians);
+    return {
+        x: Math.round((x * cosine - y * sine) * 1e9) / 1e9,
+        y: Math.round((x * sine + y * cosine) * 1e9) / 1e9,
+    };
+}
+
+function transformAttributePoint(
+    x: number,
+    y: number,
+    seedX: number,
+    seedY: number,
+    targetX: number,
+    targetY: number,
+    seedRotation: number,
+    targetRotation: number,
+    seedMirror: boolean,
+    targetMirror: boolean,
+): { x: number; y: number } {
+    const base = rotateVector(x - seedX, y - seedY, -seedRotation);
+    if (seedMirror) base.x *= -1;
+    if (targetMirror) base.x *= -1;
+    const target = rotateVector(base.x, base.y, targetRotation);
+    return { x: to2(targetX + target.x), y: to2(targetY + target.y) };
+}
+
 function cloneComponentsIntoSource(
     source: string,
     records: SourceRecord[],
@@ -232,18 +363,31 @@ function cloneComponentsIntoSource(
         const template = templates.get(key);
         if (!template?.component.inner) throw new Error(`Component template missing for ${key}`);
 
-        for (const plan of group.slice(1)) {
+        const sourceSeedX = Number(template.component.inner.x);
+        const sourceSeedY = Number(template.component.inner.y);
+        const yFactor = Math.abs(sourceSeedY - template.originApiY) <= Math.abs(sourceSeedY + template.originApiY) ? 1 : -1;
+        const seedRotation = Number(template.component.inner.rotation) || 0;
+        const seedMirror = Boolean(template.component.inner.isMirror);
+        const plansToClone = template.firstPlanSeeded ? group.slice(1) : group;
+
+        for (const plan of plansToClone) {
             const primitiveId = makeSourceId();
             plan.primitiveId = primitiveId;
 
-            const dx = plan.layoutX - template.seed.layoutX;
-            const dy = plan.layoutY - template.seed.layoutY;
+            const dx = to2(plan.apiX - template.originApiX);
+            const dy = to2((plan.apiY - template.originApiY) * yFactor);
+            const targetX = to2(sourceSeedX + dx);
+            const targetY = to2(sourceSeedY + dy);
+            const targetRotation = plan.input.pos.rotate ?? 0;
+            const targetMirror = plan.input.pos.mirror ?? false;
             const component = cloneSourceRecord(template.component);
 
             component.outer.id = primitiveId;
             component.outer.ticket = ++ticket;
-            component.inner!.x = Number(template.component.inner.x) + dx;
-            component.inner!.y = Number(template.component.inner.y) + dy;
+            component.inner!.x = targetX;
+            component.inner!.y = targetY;
+            component.inner!.rotation = targetRotation;
+            component.inner!.isMirror = targetMirror;
             component.inner!.zIndex = ++zIndex;
             appended.push(component);
 
@@ -255,8 +399,27 @@ function cloneComponentsIntoSource(
                 attribute.outer.ticket = ++ticket;
                 attribute.inner.parentId = primitiveId;
 
-                if (typeof attribute.inner.x === 'number') attribute.inner.x += dx;
-                if (typeof attribute.inner.y === 'number') attribute.inner.y += dy;
+                if (typeof attribute.inner.x === 'number' && typeof attribute.inner.y === 'number') {
+                    const point = transformAttributePoint(
+                        attribute.inner.x,
+                        attribute.inner.y,
+                        sourceSeedX,
+                        sourceSeedY,
+                        targetX,
+                        targetY,
+                        seedRotation,
+                        targetRotation,
+                        seedMirror,
+                        targetMirror,
+                    );
+                    attribute.inner.x = point.x;
+                    attribute.inner.y = point.y;
+                }
+                if (typeof attribute.inner.rotation === 'number') {
+                    attribute.inner.rotation = normalizeRotation(
+                        attribute.inner.rotation - seedRotation + targetRotation,
+                    );
+                }
                 updateInstanceAttribute(attribute.inner, plan);
                 appended.push(attribute);
             }
@@ -270,7 +433,7 @@ function cloneComponentsIntoSource(
 }
 
 async function loadPins(plans: PlannedComponent[]): Promise<void> {
-    for (const plan of plans) {
+    const load = async (plan: PlannedComponent) => {
         if (!plan.primitiveId) throw new Error(`Primitive id missing for ${plan.input.designator}`);
 
         let pins: ISCH_PrimitiveComponentPin[] | undefined;
@@ -289,6 +452,11 @@ async function loadPins(plans: PlannedComponent[]): Promise<void> {
             throw new Error(`Pins not loaded for ${plan.input.designator}: ${String(lastError ?? 'empty pin list')}`);
         }
         plan.pins = pins;
+    };
+
+    const concurrency = 16;
+    for (let index = 0; index < plans.length; index += concurrency) {
+        await Promise.all(plans.slice(index, index + concurrency).map(load));
     }
 }
 
@@ -371,7 +539,7 @@ function buildWireSpecs(
     plans: PlannedComponent[],
     offset: Offset,
 ): WireSpec[] {
-    const specs: WireSpec[] = [];
+    const rawSpecs: WireSpec[] = [];
 
     for (const edge of circuit.edges) {
         for (const section of edge.sections ?? []) {
@@ -403,23 +571,169 @@ function buildWireSpecs(
             const normalized = orthogonalize(values.map(value => to2(value)));
             if (normalized.length < 4) continue;
 
-            specs.push({
-                values: normalized,
+            rawSpecs.push({
+                segments: wireSegments(normalized),
                 net: getSignalName(circuit, sourceRef, targetRef),
                 description: `${section.incomingShape ?? '?'} -> ${section.outgoingShape ?? '?'}`,
             });
         }
     }
 
-    return specs;
+    return normalizeWireSpecs(rawSpecs);
 }
 
-function wireSegments(values: number[]): Array<[number, number, number, number]> {
-    const segments: Array<[number, number, number, number]> = [];
+function wireSegments(values: number[]): WireSegment[] {
+    const segments: WireSegment[] = [];
     for (let index = 0; index + 3 < values.length; index += 2) {
         segments.push([values[index], values[index + 1], values[index + 2], values[index + 3]]);
     }
     return segments;
+}
+
+const coordinateKey = (x: number, y: number) => `${to2(x)},${to2(y)}`;
+
+function canonicalSegment(segment: WireSegment): WireSegment | undefined {
+    let [x1, y1, x2, y2] = segment.map(to2) as WireSegment;
+    if (x1 === x2 && y1 === y2) return undefined;
+    if (x1 !== x2 && y1 !== y2) return undefined;
+    if ((x1 === x2 && y1 > y2) || (y1 === y2 && x1 > x2)) {
+        [x1, y1, x2, y2] = [x2, y2, x1, y1];
+    }
+    return [x1, y1, x2, y2];
+}
+
+function mergeCollinearSegments(segments: WireSegment[]): WireSegment[] {
+    const groups = new Map<string, WireSegment[]>();
+    for (const raw of segments) {
+        const segment = canonicalSegment(raw);
+        if (!segment) continue;
+        const key = segment[1] === segment[3] ? `H:${segment[1]}` : `V:${segment[0]}`;
+        const group = groups.get(key) ?? [];
+        group.push(segment);
+        groups.set(key, group);
+    }
+
+    const merged: WireSegment[] = [];
+    for (const [key, group] of groups) {
+        const horizontal = key.startsWith('H:');
+        group.sort((a, b) => (horizontal ? a[0] - b[0] : a[1] - b[1]));
+        let current = [...group[0]] as WireSegment;
+        for (const next of group.slice(1)) {
+            const currentEnd = horizontal ? current[2] : current[3];
+            const nextStart = horizontal ? next[0] : next[1];
+            const nextEnd = horizontal ? next[2] : next[3];
+            if (nextStart <= currentEnd) {
+                if (horizontal) current[2] = Math.max(currentEnd, nextEnd);
+                else current[3] = Math.max(currentEnd, nextEnd);
+            } else {
+                merged.push(current);
+                current = [...next] as WireSegment;
+            }
+        }
+        merged.push(current);
+    }
+    return merged;
+}
+
+function pointOnWireSegment(x: number, y: number, segment: WireSegment): boolean {
+    const [x1, y1, x2, y2] = segment;
+    if (x1 === x2) return x === x1 && y >= Math.min(y1, y2) && y <= Math.max(y1, y2);
+    return y === y1 && x >= Math.min(x1, x2) && x <= Math.max(x1, x2);
+}
+
+function splitSegmentsAtJunctions(segments: WireSegment[]): WireSegment[] {
+    const points = new Map<string, [number, number]>();
+    for (const [x1, y1, x2, y2] of segments) {
+        points.set(coordinateKey(x1, y1), [x1, y1]);
+        points.set(coordinateKey(x2, y2), [x2, y2]);
+    }
+
+    for (let leftIndex = 0; leftIndex < segments.length; leftIndex++) {
+        const left = segments[leftIndex];
+        for (let rightIndex = leftIndex + 1; rightIndex < segments.length; rightIndex++) {
+            const right = segments[rightIndex];
+            const leftHorizontal = left[1] === left[3];
+            const rightHorizontal = right[1] === right[3];
+            if (leftHorizontal === rightHorizontal) continue;
+            const horizontal = leftHorizontal ? left : right;
+            const vertical = leftHorizontal ? right : left;
+            const x = vertical[0];
+            const y = horizontal[1];
+            if (pointOnWireSegment(x, y, horizontal) && pointOnWireSegment(x, y, vertical)) {
+                points.set(coordinateKey(x, y), [x, y]);
+            }
+        }
+    }
+
+    const split: WireSegment[] = [];
+    for (const segment of segments) {
+        const onSegment = [...points.values()]
+            .filter(([x, y]) => pointOnWireSegment(x, y, segment))
+            .sort((a, b) => segment[1] === segment[3] ? a[0] - b[0] : a[1] - b[1]);
+        for (let index = 0; index + 1 < onSegment.length; index++) {
+            const part = canonicalSegment([
+                onSegment[index][0],
+                onSegment[index][1],
+                onSegment[index + 1][0],
+                onSegment[index + 1][1],
+            ]);
+            if (part) split.push(part);
+        }
+    }
+
+    return [...new Map(split.map(segment => [`${coordinateKey(segment[0], segment[1])}:${coordinateKey(segment[2], segment[3])}`, segment])).values()];
+}
+
+function connectedSegmentGroups(segments: WireSegment[]): WireSegment[][] {
+    const remaining = new Set(segments.map((_, index) => index));
+    const groups: WireSegment[][] = [];
+    while (remaining.size) {
+        const first = remaining.values().next().value as number;
+        remaining.delete(first);
+        const queue = [first];
+        const group: WireSegment[] = [];
+        const points = new Set<string>();
+
+        while (queue.length) {
+            const index = queue.shift()!;
+            const segment = segments[index];
+            group.push(segment);
+            points.add(coordinateKey(segment[0], segment[1]));
+            points.add(coordinateKey(segment[2], segment[3]));
+
+            for (const candidate of [...remaining]) {
+                const other = segments[candidate];
+                if (points.has(coordinateKey(other[0], other[1])) || points.has(coordinateKey(other[2], other[3]))) {
+                    remaining.delete(candidate);
+                    queue.push(candidate);
+                }
+            }
+        }
+        groups.push(group);
+    }
+    return groups;
+}
+
+function normalizeWireSpecs(specs: WireSpec[]): WireSpec[] {
+    const byNet = new Map<string, WireSegment[]>();
+    for (const spec of specs) {
+        const segments = byNet.get(spec.net) ?? [];
+        segments.push(...spec.segments);
+        byNet.set(spec.net, segments);
+    }
+
+    const normalized: WireSpec[] = [];
+    for (const [net, segments] of byNet) {
+        const split = splitSegmentsAtJunctions(mergeCollinearSegments(segments));
+        for (const [index, connected] of connectedSegmentGroups(split).entries()) {
+            normalized.push({
+                net,
+                segments: connected,
+                description: `${net} normalized group ${index + 1}`,
+            });
+        }
+    }
+    return normalized;
 }
 
 function scoreWireYTransform(
@@ -443,7 +757,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
     if (!specs.length) return 0;
 
     const seedSpec = specs[0];
-    const seedWire = await sch_PrimitiveWireSnap.create(seedSpec.values, seedSpec.net);
+    const seedWire = await sch_PrimitiveWireSnap.create(seedSpec.segments, seedSpec.net);
     if (!seedWire) throw new Error(`Failed to create seed wire: ${seedSpec.description}`);
     const committed = await seedWire.done();
     const seedPrimitive = committed && typeof committed === 'object' ? committed as ISCH_PrimitiveWire : seedWire;
@@ -459,7 +773,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
     const attributeTemplates = records.filter(record => record.outer.type === 'ATTR' && record.inner?.parentId === seedId);
     if (!wireTemplate?.inner || !lineTemplates[0]?.inner) throw new Error('Seed wire source template is incomplete');
 
-    const firstSegment = wireSegments(seedSpec.values)[0];
+    const firstSegment = seedSpec.segments[0];
     const yFactor: 1 | -1 = scoreWireYTransform(lineTemplates[0].inner, firstSegment, 1) <=
         scoreWireYTransform(lineTemplates[0].inner, firstSegment, -1) ? 1 : -1;
     let ticket = getMaxTicket(records);
@@ -474,7 +788,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
         wire.inner!.zIndex = ++zIndex;
         appended.push(wire);
 
-        for (const [startX, startY, endX, endY] of wireSegments(spec.values)) {
+        for (const [startX, startY, endX, endY] of spec.segments) {
             const line = cloneSourceRecord(lineTemplates[0]);
             line.outer.id = makeSourceId();
             line.outer.ticket = ++ticket;
@@ -486,9 +800,10 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
             appended.push(line);
         }
 
-        const lastX = spec.values.at(-2)!;
-        const lastY = spec.values.at(-1)!;
-        const previousX = spec.values.at(-4)!;
+        const lastSegment = spec.segments.at(-1)!;
+        const lastX = lastSegment[2];
+        const lastY = lastSegment[3];
+        const previousX = lastSegment[0];
         for (const attributeTemplate of attributeTemplates) {
             const attribute = cloneSourceRecord(attributeTemplate);
             if (!attribute.inner) continue;
@@ -506,8 +821,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
     }
 
     const nextSource = appendDocumentSource(source, appended);
-    const applied = await eda.sys_FileManager.setDocumentSource(nextSource);
-    if (!applied) throw new Error('EasyEDA rejected bulk wire document source');
+    await setSourceAndRefresh(nextSource, 'bulk wire');
     return specs.length;
 }
 
@@ -539,11 +853,368 @@ function getUnusedPinNets(circuit: CircuitAssembly, plans: PlannedComponent[]) {
         })));
 }
 
+interface SourceRemovalPoint {
+    x: number;
+    y: number;
+    net?: string;
+    reason: string;
+}
+
+interface SourceRemovalPlan {
+    componentIds: Set<string>;
+    points: SourceRemovalPoint[];
+    pinPoints: Array<[number, number]>;
+}
+
+async function findExistingPin(
+    designator: string,
+    pinNumber: string | number,
+): Promise<ISCH_PrimitiveComponentPin | undefined> {
+    const components = await searchComponentInSCH(designator).catch(() => undefined);
+    if (!components?.length) return undefined;
+    for (const component of components) {
+        const pins = await getPrimitiveComponentPins(component.primitiveId).catch(() => []);
+        const pin = pins.find(item => item.getState_PinNumber() == pinNumber);
+        if (pin) return pin;
+    }
+    return undefined;
+}
+
+async function buildSourceRemovalPlan(circuit: CircuitAssembly): Promise<SourceRemovalPlan> {
+    const componentIds = new Set<string>();
+    const points: SourceRemovalPoint[] = [];
+
+    for (const designator of circuit.rm_components ?? []) {
+        const components = await searchComponentInSCH(designator).catch(() => undefined);
+        for (const component of components ?? []) {
+            componentIds.add(component.primitiveId);
+            const pins = await getPrimitiveComponentPins(component.primitiveId).catch(() => []);
+            for (const pin of pins) {
+                points.push({
+                    x: to2(pin.getState_X()),
+                    y: to2(pin.getState_Y()),
+                    reason: `component ${designator}`,
+                });
+            }
+        }
+    }
+
+    for (const removedNet of circuit.rm_net ?? []) {
+        const pin = await findExistingPin(removedNet.designator, removedNet.pin_number);
+        if (!pin) {
+            eda.sys_Log.add(
+                `[source-assemble] rm_net pin not found: ${removedNet.designator} ${removedNet.pin_number}`,
+                ESYS_LogType.WARNING,
+            );
+            continue;
+        }
+        points.push({
+            x: to2(pin.getState_X()),
+            y: to2(pin.getState_Y()),
+            net: removedNet.net,
+            reason: `rm_net ${removedNet.designator}.${removedNet.pin_number}`,
+        });
+    }
+
+    const pinPoints = (await getAllPrimitivePins().catch(() => []))
+        .flatMap(item => item.pins)
+        .map(pin => [to2(pin.getState_X()), to2(pin.getState_Y())] as [number, number]);
+    return { componentIds, points, pinPoints };
+}
+
+const sourceLineSegment = (record: SourceRecord): WireSegment | undefined => {
+    if (record.outer.type !== 'LINE' || !record.inner?.lineGroup) return undefined;
+    const values = [record.inner.startX, record.inner.startY, record.inner.endX, record.inner.endY].map(Number);
+    if (values.some(value => !Number.isFinite(value))) return undefined;
+    return values.map(to2) as WireSegment;
+};
+
+interface WireTopology {
+    key: string;
+    net: string;
+    wireIds: Set<string>;
+    wireTemplate: SourceRecord;
+    lineTemplate: SourceRecord;
+    attributeTemplates: SourceRecord[];
+    segments: WireSegment[];
+}
+
+function splitSegmentsAtPoints(segments: WireSegment[], points: Array<[number, number]>): WireSegment[] {
+    const result: WireSegment[] = [];
+    for (const segment of segments) {
+        const splitPoints = [
+            [segment[0], segment[1]] as [number, number],
+            [segment[2], segment[3]] as [number, number],
+            ...points.filter(([x, y]) => pointOnWireSegment(x, y, segment)),
+        ];
+        const unique = [...new Map(splitPoints.map(point => [coordinateKey(point[0], point[1]), point])).values()]
+            .sort((a, b) => segment[1] === segment[3] ? a[0] - b[0] : a[1] - b[1]);
+        for (let index = 0; index + 1 < unique.length; index++) {
+            const part = canonicalSegment([unique[index][0], unique[index][1], unique[index + 1][0], unique[index + 1][1]]);
+            if (part) result.push(part);
+        }
+    }
+    return result;
+}
+
+function removeBranchesToFirstJunction(
+    segments: WireSegment[],
+    point: [number, number],
+    stopPoints: Array<[number, number]>,
+): { segments: WireSegment[]; removed: number; detachedEnds: Array<[number, number]> } {
+    const split = splitSegmentsAtPoints(segments, [point, ...stopPoints]);
+    const adjacency = new Map<string, Set<number>>();
+    const add = (key: string, index: number) => {
+        const edges = adjacency.get(key) ?? new Set<number>();
+        edges.add(index);
+        adjacency.set(key, edges);
+    };
+    split.forEach((segment, index) => {
+        add(coordinateKey(segment[0], segment[1]), index);
+        add(coordinateKey(segment[2], segment[3]), index);
+    });
+
+    const startKey = coordinateKey(point[0], point[1]);
+    const stopKeys = new Set(stopPoints.map(item => coordinateKey(item[0], item[1])));
+    const startingEdges = [...(adjacency.get(startKey) ?? [])];
+    const removed = new Set<number>();
+    const detachedEnds = new Map<string, [number, number]>();
+
+    for (const startingEdge of startingEdges) {
+        let edgeIndex: number | undefined = startingEdge;
+        let fromKey = startKey;
+        while (edgeIndex !== undefined && !removed.has(edgeIndex)) {
+            removed.add(edgeIndex);
+            const segment = split[edgeIndex];
+            const start = coordinateKey(segment[0], segment[1]);
+            const end = coordinateKey(segment[2], segment[3]);
+            const nextKey = start === fromKey ? end : start;
+            const connected = adjacency.get(nextKey) ?? new Set<number>();
+            if (nextKey !== startKey && stopKeys.has(nextKey)) {
+                if (connected.size === 1) {
+                    const [x, y] = nextKey.split(',').map(Number);
+                    detachedEnds.set(nextKey, [x, y]);
+                }
+                break;
+            }
+            if (connected.size !== 2) {
+                if (connected.size === 1 && nextKey !== startKey) {
+                    const [x, y] = nextKey.split(',').map(Number);
+                    detachedEnds.set(nextKey, [x, y]);
+                }
+                break;
+            }
+            const nextEdge = [...connected].find(index => index !== edgeIndex && !removed.has(index));
+            if (nextEdge === undefined) break;
+            fromKey = nextKey;
+            edgeIndex = nextEdge;
+        }
+    }
+
+    return {
+        segments: split.filter((_, index) => !removed.has(index)),
+        removed: removed.size,
+        detachedEnds: [...detachedEnds.values()],
+    };
+}
+
+function buildWireTopologies(records: SourceRecord[], wireNets: Map<string, string>): Map<string, WireTopology> {
+    const wireTemplates = new Map(records
+        .filter(record => record.outer.type === 'WIRE')
+        .map(record => [String(record.outer.id), record]));
+    const attributesByWire = new Map<string, SourceRecord[]>();
+    for (const record of records) {
+        if (record.outer.type !== 'ATTR') continue;
+        const parentId = String(record.inner?.parentId ?? '');
+        if (!wireTemplates.has(parentId)) continue;
+        const attributes = attributesByWire.get(parentId) ?? [];
+        attributes.push(record);
+        attributesByWire.set(parentId, attributes);
+    }
+
+    const topologies = new Map<string, WireTopology>();
+    for (const record of records) {
+        const segment = sourceLineSegment(record);
+        if (!segment) continue;
+        const wireId = String(record.inner!.lineGroup);
+        const wireTemplate = wireTemplates.get(wireId);
+        if (!wireTemplate?.inner) continue;
+        const net = wireNets.get(wireId) ?? '';
+        const key = net ? `net:${net}` : `wire:${wireId}`;
+        let topology = topologies.get(key);
+        if (!topology) {
+            topology = {
+                key,
+                net,
+                wireIds: new Set<string>(),
+                wireTemplate,
+                lineTemplate: record,
+                attributeTemplates: attributesByWire.get(wireId) ?? [],
+                segments: [],
+            };
+            topologies.set(key, topology);
+        }
+        topology.wireIds.add(wireId);
+        topology.segments.push(segment);
+    }
+
+    for (const topology of topologies.values()) {
+        topology.segments = splitSegmentsAtJunctions(mergeCollinearSegments(topology.segments));
+    }
+    return topologies;
+}
+
+interface SourceRemovalResult {
+    source: string;
+    removedRecords: number;
+    detachedNets: Array<{ x: number; y: number; net: string }>;
+}
+
+function removeSourceObjects(source: string, plan: SourceRemovalPlan): SourceRemovalResult {
+    if (!plan.componentIds.size && !plan.points.length) return { source, removedRecords: 0, detachedNets: [] };
+    const records = parseDocumentSource(source);
+    const wireNets = new Map<string, string>();
+    for (const record of records) {
+        if (record.outer.type !== 'ATTR' || record.inner?.key !== 'NET') continue;
+        const parentId = String(record.inner.parentId ?? '');
+        if (parentId) wireNets.set(parentId, String(record.inner.value ?? ''));
+    }
+
+    const topologies = buildWireTopologies(records, wireNets);
+    const affected = new Map<string, WireSegment[]>();
+    const detachedNets = new Map<string, { x: number; y: number; net: string }>();
+    for (const point of plan.points) {
+        let removed = 0;
+        for (const topology of topologies.values()) {
+            if (point.net && topology.net !== point.net) continue;
+            const current = affected.get(topology.key) ?? topology.segments;
+            const sourcePoint = ([point.y, -point.y] as number[])
+                .map(y => [point.x, y] as [number, number])
+                .find(([x, y]) => current.some(segment => pointOnWireSegment(x, y, segment)));
+            if (!sourcePoint) continue;
+            const sourcePinPoints = plan.pinPoints.flatMap(([x, y]) => [
+                [x, y] as [number, number],
+                [x, -y] as [number, number],
+            ]).filter(([x, y]) => current.some(segment => pointOnWireSegment(x, y, segment)));
+            const result = removeBranchesToFirstJunction(current, sourcePoint, sourcePinPoints);
+            if (!result.removed) continue;
+            affected.set(topology.key, result.segments);
+            removed += result.removed;
+            const yFactor = sourcePoint[1] === point.y ? 1 : -1;
+            for (const [x, y] of result.detachedEnds) {
+                if (!topology.net) continue;
+                const detached = { x: to2(x), y: to2(y * yFactor), net: topology.net };
+                detachedNets.set(`${coordinateKey(detached.x, detached.y)}:${detached.net}`, detached);
+            }
+        }
+        if (!removed) {
+            eda.sys_Log.add(`[source-assemble] No wire segment found for ${point.reason}`, ESYS_LogType.WARNING);
+        }
+    }
+
+    const affectedWireIds = new Set([...affected.keys()].flatMap(key => [...topologies.get(key)!.wireIds]));
+    const filtered = records.filter(record => {
+        const id = String(record.outer.id ?? '');
+        const parentId = String(record.inner?.parentId ?? '');
+        if (record.outer.type === 'COMPONENT' && plan.componentIds.has(id)) return false;
+        if (record.outer.type === 'ATTR' && plan.componentIds.has(parentId)) return false;
+        if (record.outer.type === 'LINE' && affectedWireIds.has(String(record.inner?.lineGroup ?? ''))) return false;
+        if (record.outer.type === 'WIRE' && affectedWireIds.has(id)) return false;
+        if (record.outer.type === 'ATTR' && affectedWireIds.has(parentId)) return false;
+        return true;
+    });
+
+    let ticket = getMaxTicket(filtered);
+    let zIndex = getMaxZIndex(filtered);
+    const added: SourceRecord[] = [];
+    for (const [key, remainingSegments] of affected) {
+        const topology = topologies.get(key)!;
+        for (const group of connectedSegmentGroups(remainingSegments)) {
+            const newWireId = makeSourceId();
+            const newWire = cloneSourceRecord(topology.wireTemplate);
+            newWire.outer.id = newWireId;
+            newWire.outer.ticket = ++ticket;
+            newWire.inner!.zIndex = ++zIndex;
+            added.push(newWire);
+
+            for (const [startX, startY, endX, endY] of group) {
+                const line = cloneSourceRecord(topology.lineTemplate);
+                line.outer.id = makeSourceId();
+                line.outer.ticket = ++ticket;
+                line.inner!.lineGroup = newWireId;
+                line.inner!.startX = startX;
+                line.inner!.startY = startY;
+                line.inner!.endX = endX;
+                line.inner!.endY = endY;
+                added.push(line);
+            }
+            for (const attributeTemplate of topology.attributeTemplates) {
+                const attribute = cloneSourceRecord(attributeTemplate);
+                attribute.outer.id = makeSourceId();
+                attribute.outer.ticket = ++ticket;
+                attribute.inner!.parentId = newWireId;
+                if (attribute.inner!.key === 'NET') {
+                    const lastSegment = group.at(-1)!;
+                    attribute.inner!.value = topology.net;
+                    attribute.inner!.x = lastSegment[2];
+                    attribute.inner!.y = lastSegment[3];
+                }
+                added.push(attribute);
+            }
+        }
+    }
+
+    return {
+        source: serializeDocumentSource([...filtered, ...added]),
+        removedRecords: records.length - filtered.length,
+        detachedNets: [...detachedNets.values()],
+    };
+}
+
+async function resolveDetachedNets(points: SourceRemovalResult['detachedNets']): Promise<AddedNet[]> {
+    if (!points.length) return [];
+    const primitives = await eda.sch_PrimitiveComponent.getAll().catch(() => []);
+    const result: AddedNet[] = [];
+    for (const primitive of primitives) {
+        const designator = primitive.getState_Designator?.();
+        if (!designator) continue;
+        const pins = await getPrimitiveComponentPins(primitive.getState_PrimitiveId()).catch(() => []);
+        for (const pin of pins) {
+            const point = points.find(item =>
+                to2(pin.getState_X()) === item.x && to2(pin.getState_Y()) === item.y,
+            );
+            if (!point) continue;
+            result.push({
+                designator,
+                pin_number: pin.getState_PinNumber(),
+                pin_name: pin.getState_PinName(),
+                net: point.net,
+            });
+        }
+    }
+    return [...new Map(result.map(item => [`${item.designator}:${item.pin_number}:${item.net}`, item])).values()];
+}
+
+async function refreshSchematicIndexes(): Promise<void> {
+    await yieldToEventLoop();
+    sch_PrimitiveWireSnap.invalidate();
+    await Promise.all([
+        eda.sch_PrimitiveComponent.getAll().catch(() => []),
+        eda.sch_PrimitiveWire.getAll().catch(() => []),
+        eda.sch_Net.getAllNets().catch(() => []),
+    ]);
+    await sch_PrimitiveWireSnap.activate();
+}
+
+async function setSourceAndRefresh(source: string, label: string): Promise<void> {
+    const applied = await eda.sys_FileManager.setDocumentSource(source);
+    if (!applied) throw new Error(`EasyEDA rejected ${label} document source`);
+    await refreshSchematicIndexes();
+}
+
 function requiresLegacyAssembler(circuit: CircuitAssembly): string | undefined {
     if (VERSION_EDASYEDA[0] < 3) return 'EasyEDA editor version is older than v3';
     if (circuit.replace_components?.length) return 'replace_components is requested';
-    if (circuit.rm_components?.length) return 'rm_components is requested';
-    if (circuit.rm_net?.length) return 'rm_net is requested';
     if (circuit.assembly_options?.draw_blocks) return 'draw_blocks is requested';
     return undefined;
 }
@@ -577,24 +1248,50 @@ export async function assembleCircuitSourceTask(
     eda.sys_Message.showToastMessage('Assemble circuit from source...', ESYS_ToastMessageType.INFO);
     eda.sys_Log.add('[source-assemble] Start', ESYS_LogType.INFO);
     const checkpointCreated = Boolean(await eda.checkpointer?.save(true));
+    let detachedNets: AddedNet[] = [];
 
     try {
+        const currentDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+        if (!currentDocument) throw new Error('Current schematic document info not found');
+        const projectUuid = currentDocument.parentProjectUuid ?? currentDocument.uuid;
+
+        const removalPlan = await buildSourceRemovalPlan(circuit);
+        if (removalPlan.componentIds.size || removalPlan.points.length) {
+            const currentSource = await eda.sys_FileManager.getDocumentSource();
+            if (!currentSource) throw new Error('Document source is empty before source removals');
+            const removalResult = removeSourceObjects(currentSource, removalPlan);
+            if (removalResult.removedRecords) {
+                await setSourceAndRefresh(removalResult.source, 'rm_components/rm_net');
+                detachedNets = await resolveDetachedNets(removalResult.detachedNets);
+                eda.sys_Log.add(`[source-assemble] Removed ${removalResult.removedRecords} source records`);
+            }
+        }
+
         const offset = await getAssemblyOffset(circuit);
         const plans = planComponents(circuit, offset);
         const groups = groupPlans(plans);
-        eda.sys_Log.add(`[source-assemble] ${plans.length} components, ${groups.size} seed variants`);
-
-        await placeSeeds(groups);
-
         let source = await eda.sys_FileManager.getDocumentSource();
-        if (!source) throw new Error('Document source is empty after component seed placement');
+        if (!source) throw new Error('Document source is empty before component placement');
         let records = parseDocumentSource(source);
-        const templates = collectComponentTemplates(records, groups);
+        const pageCachedVariants = await cacheTemplatesFromCurrentPage(groups, projectUuid, records);
+        const cachedVariants = [...groups.keys()].filter(key =>
+            componentTemplateCache.has(getTemplateCacheKey(projectUuid, key)),
+        ).length;
+        eda.sys_Log.add(
+            `[source-assemble] ${plans.length} components, ${groups.size} variants, ` +
+            `${cachedVariants} cached (${pageCachedVariants} from page)`,
+        );
+
+        const seededKeys = await placeSeeds(groups, projectUuid);
+
+        source = await eda.sys_FileManager.getDocumentSource();
+        if (!source) throw new Error('Document source is empty after component seed placement');
+        records = parseDocumentSource(source);
+        const templates = collectComponentTemplates(records, groups, projectUuid, seededKeys);
         const componentResult = cloneComponentsIntoSource(source, records, groups, templates);
 
         if (componentResult.addedCount) {
-            const applied = await eda.sys_FileManager.setDocumentSource(componentResult.source);
-            if (!applied) throw new Error('EasyEDA rejected bulk component document source');
+            await setSourceAndRefresh(componentResult.source, 'bulk component');
             source = componentResult.source;
             records = parseDocumentSource(source);
         }
@@ -603,12 +1300,10 @@ export async function assembleCircuitSourceTask(
         const wireSpecs = buildWireSpecs(circuit, plans, offset);
         const wireCount = await bulkAddWires(wireSpecs);
 
-        sch_PrimitiveWireSnap.invalidate();
-        await sch_PrimitiveWireSnap.activate();
-
         const placedComponents = toPlacedComponents(plans);
         const extraNets = [
             ...(circuit.added_net ?? []),
+            ...detachedNets,
             ...getUnusedPinNets(circuit, plans),
         ];
         if (extraNets.length) await placeNet(extraNets, placedComponents, true);
@@ -618,7 +1313,8 @@ export async function assembleCircuitSourceTask(
 
         const duration = Date.now() - startedAt;
         eda.sys_Log.add(
-            `[source-assemble] Complete in ${duration}ms: ${plans.length} components (${groups.size} API seeds), ${wireCount} wires`,
+            `[source-assemble] Complete in ${duration}ms: ${plans.length} components ` +
+            `(${seededKeys.size} API seeds), ${wireCount} wires`,
             ESYS_LogType.INFO,
         );
         eda.sys_Message.showToastMessage('Assemble complete.', ESYS_ToastMessageType.SUCCESS);

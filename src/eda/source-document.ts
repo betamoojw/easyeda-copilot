@@ -7,7 +7,7 @@ const stripRecordTerminator = (value: string) => value.endsWith('|') ? value.sli
 
 export function parseDocumentSource(source: string): SourceRecord[] {
     return source
-        .split('\n')
+        .split(/\r?\n/)
         .filter(line => line.length > 0)
         .map((line, index) => {
             const separator = line.indexOf('||');
