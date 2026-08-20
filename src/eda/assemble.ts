@@ -7,7 +7,7 @@ import { getShortSymPos, removeComponent } from "./rm-compoment-with-connections
 import { getSchematic } from "./schematic";
 import { findPin, getPrimitiveComponentPins, hasDirectWire, searchComponentInSCH } from "./search";
 import { AddedNet, ComponentToReplace, ECHOSYS_LIB, GND_PORT_COMPONENT, NET_PORT_COMPONENT, Offset, PlacedComponents, VCC_PORT_COMPONENT } from "./types";
-import { chunkArray, getPageSize, normWireY, rmPartFromDesignator, to2, withTimeout, yieldToEventLoop } from "./utils";
+import { chunkArray, getPageSize, normWireY, rmPartFromDesignator, to2, VERSION_EDASYEDA, withTimeout, yieldToEventLoop } from "./utils";
 import { sch_PrimitiveWireSnap } from "./wire-snap";
 import { assembleCircuitSourceTask } from "./assemble-source";
 import PQueue from 'p-queue';
@@ -618,6 +618,10 @@ async function assembleCircuitTask(circuit: CircuitAssembly) {
 
 export function assembleCircuit(...args: Parameters<typeof assembleCircuitTask>) {
     return assembleQueue.add(async () => {
+        if (VERSION_EDASYEDA[0] < 3) {
+            eda.sys_Log.add('[assemble] EasyEDA < 3 detected; using legacy assembler');
+            return await assembleCircuitTask(args[0]);
+        }
         await sch_PrimitiveWireSnap.activate();
         try {
             return await assembleCircuitSourceTask(args[0], assembleCircuitTask);

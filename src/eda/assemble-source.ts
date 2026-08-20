@@ -59,6 +59,36 @@ interface CachedComponentTemplate {
 
 const componentTemplateCache = new Map<string, CachedComponentTemplate>();
 
+function selectWireAttributeTemplates(records: SourceRecord[], parentId: string): SourceRecord[] {
+    const selected = new Map<string, SourceRecord>();
+    for (const record of records) {
+        if (record.outer.type !== 'ATTR' || record.inner?.parentId !== parentId) continue;
+        const key = String(record.inner.key ?? '');
+        if (key !== 'NET' && key !== 'Relevance') continue;
+        if (!selected.has(key)) selected.set(key, record);
+    }
+    return [...selected.values()];
+}
+
+function normalizeWireNetAttribute(attribute: Record<string, unknown>, net: string, segment: WireSegment): void {
+    const [startX, startY, endX, endY] = segment;
+    attribute.value = net;
+    attribute.x = to2((startX + endX) / 2);
+    attribute.y = to2((startY + endY) / 2);
+    attribute.rotation = startX === endX ? 90 : null;
+    attribute.color = null;
+    attribute.fontFamily = null;
+    attribute.fontSize = null;
+    attribute.fontWeight = null;
+    attribute.italic = null;
+    attribute.underline = null;
+    attribute.strikeout = false;
+    attribute.align = null;
+    attribute.fillColor = null;
+    attribute.keyVisible = false;
+    attribute.valueVisible = true;
+}
+
 const applyOffset = (x: number, y: number, offset: Offset) => {
     if (offset.x) x += offset.x;
     if (offset.y) y = offset.y - y;
@@ -899,7 +929,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
     if (!wireTemplate?.inner) throw new Error('Bulk wire source template is incomplete');
     const templateId = String(wireTemplate.outer.id);
     const lineTemplates = records.filter(record => record.outer.type === 'LINE' && record.inner?.lineGroup === templateId);
-    const attributeTemplates = records.filter(record => record.outer.type === 'ATTR' && record.inner?.parentId === templateId);
+    const attributeTemplates = selectWireAttributeTemplates(records, templateId);
     if (!lineTemplates[0]?.inner) throw new Error('Bulk wire LINE template is missing');
     const firstSegment = templateApiSegment ?? specs[0].segments[0];
     const yFactor: 1 | -1 = scoreWireYTransform(lineTemplates[0].inner, firstSegment, 1) <=
@@ -929,9 +959,12 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
         }
 
         const lastSegment = spec.segments.at(-1)!;
-        const lastX = lastSegment[2];
-        const lastY = lastSegment[3];
-        const previousX = lastSegment[0];
+        const sourceLastSegment: WireSegment = [
+            lastSegment[0],
+            lastSegment[1] * yFactor,
+            lastSegment[2],
+            lastSegment[3] * yFactor,
+        ];
         for (const attributeTemplate of attributeTemplates) {
             const attribute = cloneSourceRecord(attributeTemplate);
             if (!attribute.inner) continue;
@@ -939,10 +972,7 @@ async function bulkAddWires(specs: WireSpec[]): Promise<number> {
             attribute.outer.ticket = ++ticket;
             attribute.inner.parentId = wireId;
             if (attribute.inner.key === 'NET') {
-                attribute.inner.value = spec.net;
-                attribute.inner.x = lastX;
-                attribute.inner.y = lastY * yFactor;
-                attribute.inner.rotation = previousX === lastX ? 90 : 0;
+                normalizeWireNetAttribute(attribute.inner, spec.net, sourceLastSegment);
             }
             appended.push(attribute);
         }
@@ -1111,40 +1141,67 @@ async function bulkAddNetAttachments(
             continue;
         }
 
+        const requestedPort = (netCountByDesignator.get(net.designator) ?? 0) < 5;
         const rotation = normalizeRotation(resolved.pin.getState_Rotation());
         const primaryDirection = rotation >= 270 ? 3 : rotation >= 180 ? 2 : rotation >= 90 ? 1 : 0;
-        const directions: Array<[number, number]> = [[1, 0], [0, normWireY(1)], [-1, 0], [0, normWireY(-1)]];
-        const directionOrder = [primaryDirection, ...[0, 1, 2, 3].filter(index => index !== primaryDirection)];
-        const lengths = [20, 30, 40, 50, 60, 80, 100, 120, 160, 200, 10, 5];
+        const directions = [
+            { dx: 1, dy: 0, portOffsetY: normWireY(1) },
+            { dx: 0, dy: normWireY(1), portOffsetY: 0 },
+            { dx: -1, dy: 0, portOffsetY: normWireY(1) },
+            { dx: 0, dy: normWireY(-1), portOffsetY: 0 },
+        ];
+        const forbiddenDirection = (primaryDirection + 2) % 4;
+        const directionOrder = resolved.pins.length >= 3
+            ? [primaryDirection]
+            : [primaryDirection, ...[0, 1, 2, 3].filter(index =>
+                index !== primaryDirection && index !== forbiddenDirection,
+            )];
+        const lengths = [20, 30, ...Array.from({ length: 39 }, (_, index) => 40 + index * 20), 15, 10, 5];
+        const portOffsetLengths = Array.from({ length: 80 }, (_, index) => (index + 1) * 10);
         let selected: {
-            segment: WireSegment;
-            canonical: WireSegment;
-            direction: [number, number];
+            segments: WireSegment[];
+            canonicalSegments: WireSegment[];
+            direction: typeof directions[number];
             endX: number;
             endY: number;
+            makePort: boolean;
         } | undefined;
 
         for (const directionIndex of directionOrder) {
             const direction = directions[directionIndex];
-            for (const length of lengths) {
-                const directed: WireSegment = [
-                    pinX,
-                    pinY,
-                    pinX + direction[0] * length,
-                    pinY + direction[1] * length,
-                ];
-                const candidate = canonicalSegment(directed);
-                if (!candidate) continue;
-                const endX = pinX + direction[0] * length;
-                const endY = pinY + direction[1] * length;
-                const hitsPin = resolved.pins.some(pin =>
-                    pin !== resolved.pin && coordinateKey(pin.getState_X(), pin.getState_Y()) === coordinateKey(endX, endY),
-                );
-                const conflicts = occupied.some(item => item.net !== net.net && wireSegmentsConflict(candidate, item.segment));
-                if (!hitsPin && !conflicts) {
-                    selected = { segment: directed, canonical: candidate, direction, endX, endY };
-                    break;
+            for (const makePort of requestedPort ? [true, false] : [false]) {
+                for (const length of lengths) {
+                    const middleX = pinX + direction.dx * length;
+                    const middleY = pinY + direction.dy * length;
+                    const offsets = makePort && direction.portOffsetY !== 0 ? portOffsetLengths : [0];
+                    for (const portOffsetLength of offsets) {
+                        const endX = middleX;
+                        const endY = middleY + direction.portOffsetY * portOffsetLength;
+                        const segments: WireSegment[] = [[pinX, pinY, middleX, middleY]];
+                        if (middleX !== endX || middleY !== endY) {
+                            segments.push([middleX, middleY, endX, endY]);
+                        }
+                        const canonicalSegments = segments
+                            .map(canonicalSegment)
+                            .filter((segment): segment is WireSegment => Boolean(segment));
+                        if (canonicalSegments.length !== segments.length) continue;
+
+                        const hitsPin = resolved.pins.some(pin =>
+                            pin !== resolved.pin &&
+                            coordinateKey(pin.getState_X(), pin.getState_Y()) === coordinateKey(endX, endY),
+                        );
+                        const hitsWire = occupied.some(item => pointOnWireSegment(endX, endY, item.segment));
+                        const conflicts = canonicalSegments.some(candidate => occupied.some(item =>
+                            item.net !== net.net && wireSegmentsConflict(candidate, item.segment),
+                        ));
+                        if (!hitsPin && !hitsWire && !conflicts) {
+                            selected = { segments, canonicalSegments, direction, endX, endY, makePort };
+                            break;
+                        }
+                    }
+                    if (selected) break;
                 }
+                if (selected) break;
             }
             if (selected) break;
         }
@@ -1159,10 +1216,9 @@ async function bulkAddNetAttachments(
         }
 
         const { endX, endY } = selected;
-        const makePort = (netCountByDesignator.get(net.designator) ?? 0) < 5;
-        if (makePort) {
+        if (selected.makePort) {
             const portData = selectPortForNet(net.net);
-            let portRotation = selected.direction[1] === normWireY(-1) ? 180 : 0;
+            let portRotation = selected.direction.dy === normWireY(-1) ? 180 : 0;
             if (portData.rotateToIdle === -1) portRotation += 180;
             const input = {
                 designator: `${net.net}|${makeSourceId().slice(0, 6)}`,
@@ -1190,9 +1246,13 @@ async function bulkAddNetAttachments(
                 templateKey: getComponentTemplateKey(input),
             });
         }
-        const wireSpec = { segments: [selected.segment], net: net.net, description: `bulk port ${net.designator}.${net.pin_number}` };
+        const wireSpec = {
+            segments: selected.segments,
+            net: net.net,
+            description: `bulk port ${net.designator}.${net.pin_number}`,
+        };
         portWires.push(wireSpec);
-        occupied.push({ net: net.net, segment: selected.canonical });
+        occupied.push(...selected.canonicalSegments.map(segment => ({ net: net.net, segment })));
     }
 
     if (!portPlans.length) return { wireSpecs: portWires, portCount: 0, unresolved, apiSeeds: 0 };
@@ -1386,13 +1446,14 @@ function buildWireTopologies(records: SourceRecord[], wireNets: Map<string, stri
     const wireTemplates = new Map(records
         .filter(record => record.outer.type === 'WIRE')
         .map(record => [String(record.outer.id), record]));
-    const attributesByWire = new Map<string, SourceRecord[]>();
+    const attributesByWire = new Map<string, Map<string, SourceRecord>>();
     for (const record of records) {
         if (record.outer.type !== 'ATTR') continue;
         const parentId = String(record.inner?.parentId ?? '');
-        if (!wireTemplates.has(parentId)) continue;
-        const attributes = attributesByWire.get(parentId) ?? [];
-        attributes.push(record);
+        const key = String(record.inner?.key ?? '');
+        if (!wireTemplates.has(parentId) || (key !== 'NET' && key !== 'Relevance')) continue;
+        const attributes = attributesByWire.get(parentId) ?? new Map<string, SourceRecord>();
+        if (!attributes.has(key)) attributes.set(key, record);
         attributesByWire.set(parentId, attributes);
     }
 
@@ -1413,7 +1474,7 @@ function buildWireTopologies(records: SourceRecord[], wireNets: Map<string, stri
                 wireIds: new Set<string>(),
                 wireTemplate,
                 lineTemplate: record,
-                attributeTemplates: attributesByWire.get(wireId) ?? [],
+                attributeTemplates: [...(attributesByWire.get(wireId)?.values() ?? [])],
                 segments: [],
             };
             topologies.set(key, topology);
@@ -1519,9 +1580,7 @@ function removeSourceObjects(source: string, plan: SourceRemovalPlan): SourceRem
                 attribute.inner!.parentId = newWireId;
                 if (attribute.inner!.key === 'NET') {
                     const lastSegment = group.at(-1)!;
-                    attribute.inner!.value = topology.net;
-                    attribute.inner!.x = lastSegment[2];
-                    attribute.inner!.y = lastSegment[3];
+                    normalizeWireNetAttribute(attribute.inner!, topology.net, lastSegment);
                 }
                 added.push(attribute);
             }
