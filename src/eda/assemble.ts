@@ -9,6 +9,7 @@ import { findPin, getPrimitiveComponentPins, hasDirectWire, searchComponentInSCH
 import { AddedNet, ComponentToReplace, ECHOSYS_LIB, GND_PORT_COMPONENT, NET_PORT_COMPONENT, Offset, PlacedComponents, VCC_PORT_COMPONENT } from "./types";
 import { chunkArray, getPageSize, normWireY, rmPartFromDesignator, to2, withTimeout, yieldToEventLoop } from "./utils";
 import { sch_PrimitiveWireSnap } from "./wire-snap";
+import { assembleCircuitSourceTask } from "./assemble-source";
 import PQueue from 'p-queue';
 
 const assembleQueue = new PQueue({ concurrency: 1 });
@@ -619,7 +620,7 @@ export function assembleCircuit(...args: Parameters<typeof assembleCircuitTask>)
     return assembleQueue.add(async () => {
         await sch_PrimitiveWireSnap.activate();
         try {
-            return await assembleCircuitTask(...args);
+            return await assembleCircuitSourceTask(args[0], assembleCircuitTask);
         } finally {
             sch_PrimitiveWireSnap.deactivate();
         }
