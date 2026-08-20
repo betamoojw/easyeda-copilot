@@ -20,6 +20,7 @@ import {
 type AssemblyComponent = CircuitAssembly['components'][number];
 type PrimitiveComponent = ISCH_PrimitiveComponent | ISCH_PrimitiveComponent$1;
 type LegacyAssembler = (circuit: CircuitAssembly) => Promise<void>;
+type LegacyBlockDrawer = (blocks: CircuitAssembly['blocks_rect'], offset: Offset) => Promise<void>;
 
 interface PlannedComponent {
     input: AssemblyComponent;
@@ -1939,7 +1940,6 @@ async function removeUnusedShortSymbols(): Promise<number> {
 
 function requiresLegacyAssembler(circuit: CircuitAssembly): string | undefined {
     if (VERSION_EDASYEDA[0] < 3) return 'EasyEDA editor version is older than v3';
-    if (circuit.assembly_options?.draw_blocks) return 'draw_blocks is requested';
     return undefined;
 }
 
@@ -1961,6 +1961,7 @@ async function getAssemblyOffset(circuit: CircuitAssembly): Promise<Offset> {
 export async function assembleCircuitSourceTask(
     circuit: CircuitAssembly,
     legacyAssembler: LegacyAssembler,
+    legacyBlockDrawer: LegacyBlockDrawer,
 ): Promise<void> {
     const fallbackReason = requiresLegacyAssembler(circuit);
     if (fallbackReason) {
@@ -2056,6 +2057,10 @@ export async function assembleCircuitSourceTask(
         const wireSpecs = normalizeWireSpecs([...circuitWireSpecs, ...attachmentResult.wireSpecs]);
         eda.sys_Log.add('[source-assemble] Stage: bulk wires', ESYS_LogType.INFO);
         const wireCount = await bulkAddWires(wireSpecs);
+        if (workingCircuit.assembly_options?.draw_blocks) {
+            eda.sys_Log.add('[source-assemble] Stage: legacy block drawing', ESYS_LogType.INFO);
+            await legacyBlockDrawer(workingCircuit.blocks_rect, offset);
+        }
         eda.sys_Log.add('[source-assemble] Stage: short-symbol cleanup', ESYS_LogType.INFO);
         const removedShortSymbols = await removeUnusedShortSymbols();
         if (attachmentResult.unresolved) {

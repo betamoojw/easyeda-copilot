@@ -624,7 +624,7 @@ export function assembleCircuit(...args: Parameters<typeof assembleCircuitTask>)
         }
         await sch_PrimitiveWireSnap.activate();
         try {
-            return await assembleCircuitSourceTask(args[0], assembleCircuitTask);
+            return await assembleCircuitSourceTask(args[0], assembleCircuitTask, drawRect);
         } finally {
             sch_PrimitiveWireSnap.deactivate();
         }
