@@ -1944,10 +1944,14 @@ function requiresLegacyAssembler(circuit: CircuitAssembly): string | undefined {
 }
 
 async function getAssemblyOffset(circuit: CircuitAssembly): Promise<Offset> {
-    const root = circuit.blocks_rect?.find(block => block.name.includes('__v_root__')) ?? {
-        width: 10,
-        height: 10,
-    };
+    let root = circuit.blocks_rect?.find(block => block.name.includes('__v_root__'));
+    if (!root) {
+        eda.sys_Log.add(
+            '[source-assemble] Root not found in asm circuit; using 10x10 fallback',
+            ESYS_LogType.ERROR,
+        );
+        root = { name: '__v_root__', description: '', x: 0, y: 0, width: 10, height: 10 };
+    }
     const pageSize = await getPageSize();
     const target = {
         x: (pageSize.width - root.width) / 2,
