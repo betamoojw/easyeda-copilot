@@ -576,7 +576,8 @@ async function drawVias(vias: BoardAssemble["vias"]) {
                         diameter,
                         EPCB_PrimitiveViaType.VIA,
                         null,
-                        null,
+                        {},
+                        false,
                     ),
                     "create returned undefined",
                 );
@@ -761,22 +762,30 @@ async function drawRoutingTracks(tracks: RoutingCopperApplication['tracks']) {
 }
 
 async function drawRoutingVias(vias: RoutingCopperApplication['vias']) {
-    for (const via of vias) {
+    for (const [index, via] of vias.entries()) {
         const drill = validLengthMmToMil(via.drillMm, MIN_COPPER_WIDTH_MM);
         const diameter = Math.max(validLengthMmToMil(via.diameterMm, via.drillMm), drill);
-        await commitPrimitive(
-            await eda.pcb_PrimitiveVia.create(
-                via.net,
-                mmToMil(via.x),
-                mmToMil(via.y),
-                drill,
-                diameter,
-                EPCB_PrimitiveViaType.VIA,
-                null,
-                null,
-            ),
-            `Failed to create routed via ${via.id ?? via.net}`,
-        );
+        const label = via.id ?? `${via.net} #${index + 1}`;
+        try {
+            await commitPrimitive(
+                await eda.pcb_PrimitiveVia.create(
+                    via.net,
+                    mmToMil(via.x),
+                    mmToMil(via.y),
+                    drill,
+                    diameter,
+                    EPCB_PrimitiveViaType.VIA,
+                    null,
+                    {},
+                    false,
+                ),
+                `Failed to create routed via ${label}`,
+            );
+        } catch (error) {
+            throw new Error(
+                `Failed to create routed via ${label}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
         await yieldToEventLoop();
     }
 }
