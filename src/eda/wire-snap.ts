@@ -67,6 +67,9 @@ function snapshotToWire(snapshot: WireSnapshot): ISCH_PrimitiveWire {
 
     return new Proxy(impl, {
         get(target, prop) {
+            // Promise resolution probes returned objects for a `then` method.
+            // This snapshot is deliberately not thenable.
+            if (prop === "then") return undefined;
 
             if (!allowed.has(prop)) {
                 eda.sys_Log.add(
@@ -76,7 +79,7 @@ function snapshotToWire(snapshot: WireSnapshot): ISCH_PrimitiveWire {
                 );
             }
 
-            return (target as any)[prop];
+            return Reflect.get(target, prop);
         },
     }) as unknown as ISCH_PrimitiveWire;
 }
@@ -84,7 +87,7 @@ function snapshotToWire(snapshot: WireSnapshot): ISCH_PrimitiveWire {
 function wrapWire(wire: ISCH_PrimitiveWire): ISCH_PrimitiveWire {
     return new Proxy(wire, {
         get(target, prop) {
-            const value = (target as any)[prop];
+            const value = Reflect.get(target, prop);
             if (prop === "done" && typeof value === "function") {
                 return async (...args: unknown[]) => {
                     try {
@@ -95,7 +98,8 @@ function wrapWire(wire: ISCH_PrimitiveWire): ISCH_PrimitiveWire {
                         const committed =
                             result &&
                                 typeof result === "object" &&
-                                typeof (result as any).getState_PrimitiveId === "function"
+                                "getState_PrimitiveId" in result &&
+                                typeof result.getState_PrimitiveId === "function"
                                 ? (result as ISCH_PrimitiveWire)
                                 : target;
                         setSnapshot(committed);
@@ -268,7 +272,7 @@ export const sch_PrimitiveWireSnap = {
             // Make sure the modification is actually committed. EasyEDA's static
             // modify() sometimes returns an asynchronous object whose changes are
             // only applied after done() is called.
-            await (wire as any).done?.().catch(() => undefined);
+            await wire.done().catch(() => undefined);
 
             setSnapshot(wire);
         }
