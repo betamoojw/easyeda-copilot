@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 const adapter = await import(pathToFileURL(resolve('dist/routing/easyeda-autoroute-adapter.js')).href);
 const drcAdapter = await import(pathToFileURL(resolve('dist/routing/easyeda-drc-adapter.js')).href);
+const router = await import('eda-copilot-router');
 
 const fixture = {
     boardOutline: { path: [[-5, -5], [5, -5], [5, 5], [-5, 5], [-5, -5]] },
@@ -42,10 +43,25 @@ assert.ok(imported.board, JSON.stringify(imported.diagnostics));
 assert.equal(imported.diagnostics.filter(item => item.severity === 'error').length, 0);
 assert.equal(imported.board.pads.length, 2, 'duplicate logical pad numbers are physical pads, not an error');
 assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x: 1, y: -1 }]);
-assert.equal(imported.board.copper.editable.tracks.length, 1);
-assert.equal(imported.board.copper.fixed.tracks.length, 0);
+assert.equal(imported.board.copper.editable.tracks.length, 0);
+assert.equal(imported.board.copper.fixed.tracks.length, 1);
 assert.equal(imported.board.rules.nets[0].values.preferredTrackWidthMm, 0.25);
 assert.deepEqual(imported.board.rules.differentialPairs, [{ id: 'pair', positive: 'SIG', negative: 'SIG_N' }]);
+
+const rerouteImport = adapter.importEasyEdaAutorouteJson(fixture, {
+    clearRouting: { nets: ['SIG'], items: ['tracks'] },
+});
+assert.ok(rerouteImport.board, JSON.stringify(rerouteImport.diagnostics));
+assert.equal(rerouteImport.board.copper.editable.tracks.length, 1);
+assert.equal(rerouteImport.board.copper.fixed.tracks.length, 0);
+
+const copperOnly = await router.run({
+    board: rerouteImport.board,
+    dsl: `clearRouting({ nets: ["SIG"], items: ["tracks"] }); runCopper();`,
+});
+assert.equal(copperOnly.status, 'complete');
+assert.deepEqual(copperOnly.clearRouting, { nets: ['SIG'], items: ['tracks'] });
+assert.equal(copperOnly.copper.tracks.length, 0);
 
 const application = adapter.routingResultToEasyEdaApplication({
     status: 'complete', operation: 'route',
@@ -57,8 +73,8 @@ const application = adapter.routingResultToEasyEdaApplication({
     },
     diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
 });
-assert.deepEqual(application.autorouteResult.traces[0].path, [[1, 3], [2, 3]]);
-assert.deepEqual(application.autorouteResult.vias[0].location, [2, 3]);
+assert.deepEqual(application.tracks[0].points, [[1, 3], [2, 3]]);
+assert.deepEqual(application.vias[0].location, [2, 3]);
 assert.equal(application.diagnostics.length, 0);
 
 const values = {

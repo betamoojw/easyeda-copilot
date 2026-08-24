@@ -19,7 +19,7 @@
 6. Show the final placement to the user for approval. Assemble only after that approval.
 7. Route and run DRC in EasyEDA v3/client tools.
 
-If `make_pcb_layout` returns `status: "pending"`, call `wait_pcb_layout({ operationId })`. Otherwise use its completed result directly.
+If `make_pcb_layout` returns `status: "running"`, call `wait_operation({ operation_id })`. Otherwise use its completed result directly.
 
 ## Errors And Warnings
 

@@ -12,7 +12,7 @@ export function registerPcbTools(server: McpServer, bridge: Bridge) {
         'get_pcb_stack_layers',
         {
             title: 'Get PCB Stack Layers',
-            description: 'Return the current PCB copper layer count and active signal routing layers. Open the target PCB document first. Use before choosing route_layers for run_auto_route_on_current_pcbdoc.',
+            description: 'Return the current PCB copper layer count and active signal routing layers. Open the target PCB document first and inspect this before writing router DSL layer constraints.',
             inputSchema: z.object({}),
         },
         async () => {

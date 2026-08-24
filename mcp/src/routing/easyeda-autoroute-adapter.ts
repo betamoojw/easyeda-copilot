@@ -5,17 +5,18 @@ import type {
     RoutedZone,
     RoutingBoard,
     RoutingCopper,
+    RoutingClearIntent,
     RoutingDiagnostic,
     RoutingResult,
     RoutingRuleValues,
     RoutingRules,
-} from '@easyeda-copilot/router';
-import { validateRoutingBoard } from '@easyeda-copilot/router';
+} from 'eda-copilot-router';
+import { validateRoutingBoard } from 'eda-copilot-router';
 
 type JsonRecord = Record<string, unknown>;
 
 export type EasyEdaAutorouteCaptureOptions = Readonly<{
-    existingCopper?: 'fixed' | 'editable';
+    clearRouting?: RoutingClearIntent;
 }>;
 
 export type EasyEdaAutorouteImport = Readonly<{
@@ -24,14 +25,21 @@ export type EasyEdaAutorouteImport = Readonly<{
 }>;
 
 export type EasyEdaRoutingApplication = Readonly<{
-    /** Payload accepted by pcb_Document.importAutoRouteJsonFile. */
-    autorouteResult?: Readonly<{
-        progress: 1;
-        routabitity: number;
-        traces: readonly JsonRecord[];
-        vias: readonly JsonRecord[];
-    }>;
-    /** Host-native pours created after autoroute trace/via import. */
+    clearRouting?: RoutingClearIntent;
+    tracks: readonly Readonly<{
+        id?: string;
+        net: string;
+        layer: number;
+        widthMm: number;
+        points: readonly (readonly [number, number])[];
+    }>[];
+    vias: readonly Readonly<{
+        id?: string;
+        net: string;
+        location: readonly [number, number];
+        diameterMm: number;
+        drillMm: number;
+    }>[];
     zones: readonly Readonly<{
         id?: string;
         net: string;
@@ -40,7 +48,6 @@ export type EasyEdaRoutingApplication = Readonly<{
         holes: readonly (readonly (readonly number[])[])[];
         priority: number;
         minThicknessMm?: number;
-        connection?: string;
     }>[];
     rules: RoutingResult['rules'];
     diagnostics: readonly RoutingDiagnostic[];
@@ -374,11 +381,23 @@ export function importEasyEdaAutorouteJson(
         }];
     });
     const zones = importedZones(root, layerNames, diagnostics);
-    for (const zone of zones) netNames.add(zone.net);
+    for (const zone of zones) if (zone.net) netNames.add(zone.net);
     const importedCopper: RoutingCopper = { tracks: importedTracks, vias: importedVias, zones };
-    // EasyEDA apply replaces router-owned copper as one complete state, so
-    // existing autoroute copper is editable by default and is returned again.
-    const existingCopper = options.existingCopper ?? 'editable';
+    const selectedForClear = (net: string | undefined, item: RoutingClearIntent['items'][number]) => (
+        net !== undefined
+        && Boolean(options.clearRouting?.items.includes(item))
+        && (options.clearRouting?.nets === 'all' || options.clearRouting?.nets.includes(net))
+    );
+    const editable: RoutingCopper = {
+        tracks: importedCopper.tracks.filter(item => selectedForClear(item.net, 'tracks')),
+        vias: importedCopper.vias.filter(item => selectedForClear(item.net, 'vias')),
+        zones: importedCopper.zones.filter(item => selectedForClear(item.net, 'zones')),
+    };
+    const fixed: RoutingCopper = {
+        tracks: importedCopper.tracks.filter(item => !selectedForClear(item.net, 'tracks')),
+        vias: importedCopper.vias.filter(item => !selectedForClear(item.net, 'vias')),
+        zones: importedCopper.zones.filter(item => !selectedForClear(item.net, 'zones')),
+    };
     const board: RoutingBoard = {
         outline,
         cutouts: [],
@@ -388,9 +407,7 @@ export function importEasyEdaAutorouteJson(
         pads,
         keepouts: importedKeepouts(root, layerNames, diagnostics),
         rules,
-        copper: existingCopper === 'fixed'
-            ? { fixed: importedCopper, editable: EMPTY_COPPER }
-            : { fixed: EMPTY_COPPER, editable: importedCopper },
+        copper: options.clearRouting ? { fixed, editable } : { fixed: importedCopper, editable: EMPTY_COPPER },
     };
     const validation = validateRoutingBoard(board);
     diagnostics.push(...validation.diagnostics);
@@ -405,7 +422,19 @@ function toEasyEdaPoint(pointValue: PointMm) {
 
 export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEdaRoutingApplication {
     const diagnostics: RoutingDiagnostic[] = [];
-    if (!result.copper) return { zones: [], rules: result.rules, diagnostics: result.diagnostics };
+    if (result.stackup?.applyRequested) diagnostics.push({
+        code: 'EASYEDA_STACKUP_APPLY_UNSUPPORTED',
+        severity: 'error',
+        message: 'EasyEDA Copilot cannot persist a physical router stackup with the currently available EasyEDA API.',
+    });
+    if (!result.copper) return {
+        tracks: [],
+        vias: [],
+        zones: [],
+        ...(result.clearRouting ? { clearRouting: result.clearRouting } : {}),
+        rules: result.rules,
+        diagnostics: [...result.diagnostics, ...diagnostics],
+    };
     const traces = result.copper.tracks.flatMap((track, index) => {
         const layer = layerId(track.layer);
         if (!layer) {
@@ -416,20 +445,44 @@ export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEd
             return [];
         }
         return [{
-            id: track.id ?? `routing-result-track-${index}`,
+            id: track.id,
             layer,
             net: track.net,
-            width: track.widthMm,
-            path: track.points.map(toEasyEdaPoint),
+            widthMm: track.widthMm,
+            points: track.points.map(toEasyEdaPoint),
         }];
     });
-    const vias = result.copper.vias.map((via, index) => ({
-        id: via.id ?? `routing-result-via-${index}`,
-        location: toEasyEdaPoint(via.at),
-        net: via.net,
-        size: [via.diameterMm, via.drillMm],
-    }));
+    const vias = result.copper.vias.flatMap((via, index) => {
+        if (via.type && via.type !== 'through') {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_VIA_TYPE_UNSUPPORTED', severity: 'error',
+                message: `Via ${via.id ?? index} uses unsupported EasyEDA via type ${via.type}.`,
+            });
+            return [];
+        }
+        return [{
+            id: via.id,
+            location: toEasyEdaPoint(via.at),
+            net: via.net,
+            diameterMm: via.diameterMm,
+            drillMm: via.drillMm,
+        }];
+    });
     const zones = result.copper.zones.flatMap((zone, index) => {
+        if (!zone.net) {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_ZONE_NET_REQUIRED', severity: 'error',
+                message: `Zone ${zone.id ?? index} has no electrical net and cannot be applied safely in EasyEDA.`,
+            });
+            return [];
+        }
+        if (zone.outline.holes?.length) {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_ZONE_HOLES_UNSUPPORTED', severity: 'error',
+                message: `Zone ${zone.id ?? index} contains holes that the EasyEDA host adapter cannot preserve.`,
+            });
+            return [];
+        }
         const layers = zone.layers.map(layerId).filter((item): item is number => item !== undefined);
         if (layers.length !== zone.layers.length) {
             diagnostics.push({
@@ -443,19 +496,15 @@ export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEd
             net: zone.net,
             layers,
             outline: zone.outline.outer.map(toEasyEdaPoint),
-            holes: (zone.outline.holes ?? []).map(ring => ring.map(toEasyEdaPoint)),
+            holes: [],
             priority: zone.priority ?? 0,
             minThicknessMm: zone.minThicknessMm,
-            connection: zone.connection,
         }];
     });
     return {
-        autorouteResult: {
-            progress: 1,
-            routabitity: result.status === 'complete' ? 1 : 0,
-            traces,
-            vias,
-        },
+        ...(result.clearRouting ? { clearRouting: result.clearRouting } : {}),
+        tracks: traces,
+        vias,
         zones,
         rules: result.rules,
         diagnostics: [...result.diagnostics, ...diagnostics],

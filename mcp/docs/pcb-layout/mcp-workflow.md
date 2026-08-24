@@ -5,8 +5,8 @@ Read `dsl.ts` for syntax and `instructions.md` for placement rules. `make_pcb_la
 ## Tools
 
 - `make_pcb_layout({ file })` reads the local DSL and current schematic, runs placement, stores the BoardAssemble payload in MCP memory, and returns report + `layoutId` + preview paths.
-- `wait_pcb_layout({ operationId })` is needed only when `make_pcb_layout` returns `status: "pending"` after its 60-second synchronous wait.
-- `cancel_pcb_layout({ operationId })` stops an obsolete pending placement.
+- `wait_operation({ operation_id })` is needed only when `make_pcb_layout` returns `status: "running"` after its initial synchronous wait.
+- `cancel_operation({ operation_id })` stops an obsolete pending placement.
 - `assemble_pcb_layout_on_current_pcbdoc({ layoutId })` imports a previously completed final placement into the currently open PCB document.
 
 `previewSvgPath` is the primary review image. `previewImagePath` is PNG fallback. `debugArtifacts` are optional local SVGs for a visibly bad block, family, or module.

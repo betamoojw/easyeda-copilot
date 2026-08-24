@@ -1,23 +1,27 @@
-# Local routing package integration
+# eda-copilot-router integration
 
-The EasyEDA host is intentionally a thin boundary around
-`@easyeda-copilot/router`:
+EasyEDA Copilot consumes `eda-copilot-router@0.2.1` through the same public
+contract as KiCad Copilot. The router package owns the DSL, EDA-neutral board
+model, polygon planning, KRT backend, managed backend assets, and diagnostics.
+EasyEDA-specific document objects remain in the host adapter.
 
-1. `export-routing-input` captures the autorouter board and native DRC once.
-2. `runRoutingOnCurrentEasyEdaPcb()` converts that capture to `RoutingBoard`
-   and runs the DSL and backend locally. The router package does not call
-   EasyEDA while it is working.
-3. `apply-routing-result` applies the effective DRC and the complete
-   `RoutingResult.copper` state in one checkpointed transaction. Any failure
-   restores the document checkpoint.
+One PCB DSL operation has these boundaries:
 
-The package is consumed through the local file dependency in `mcp/package.json`.
-The host entry point is built as:
+1. Compile the local DSL and identify any explicit `clearRouting(...)` intent.
+2. Capture EasyEDA autoroute input and native DRC once.
+3. Import preserved copper as fixed and only explicitly cleared copper as
+   editable.
+4. Run `eda-copilot-router` and KRT completely offline with an `AbortSignal`.
+5. Validate the complete result before changing the editor.
+6. Apply requested DRC, selective deletion, new copper, refill, and native DRC
+   inside one EasyEDA checkpoint recovery boundary.
 
-```text
-mcp/dist/routing/run-easyeda-routing.js
-```
+The MCP entry point is `run_pcb_router_dsl`. A still-running call returns a
+prefixed `operation_id`; continue it with the shared `wait_operation` tool or
+stop it with `cancel_operation`.
 
-Use `apply: false` to inspect a result without mutating the open document.
-Live application currently supports the top and bottom copper layers and
-rejects zone holes instead of applying a lossy result.
+Existing copper is preserved unless the DSL explicitly calls
+`clearRouting(...)`. Physical `applyStackup()` is rejected because the current
+EasyEDA extension API does not expose a lossless physical stackup writer.
+Tracks and zones support every active EasyEDA copper layer. Only through vias
+and zone outlines without holes can currently be applied.

@@ -8,8 +8,6 @@ const BOARD_OUTLINE_WIDTH_MM = 0.254;
 const DEFAULT_POUR_LINE_WIDTH_MM = 0.15;
 const MIN_COPPER_WIDTH_MM = 0.01;
 const SAME_POINT_EPS = 1e-9;
-const DEFAULT_GND_NET = "GND";
-const DEFAULT_GND_POUR_PREFIX = "COPILOT_GND";
 const PCB_CLEAR_TIMEOUT_MS = 5000;
 const PCB_POST_CLEAR_SETTLE_MS = 500;
 
@@ -22,18 +20,12 @@ type BoardLayer = NonNullable<BoardAssemble["components"]>[number]["layer"];
 type BoardPad = NonNullable<BoardAssemble["pads"]>[number];
 type BoardPadLayer = BoardPad["layer"];
 
-export type GroundSutureOptions = {
-    gridMm?: number;
-    diameterMm?: number;
-    drillMm?: number;
-    edgeMarginMm?: number;
-    maxCount?: number;
-};
-
 export type ClearPcbBoardOptions = {
     ignoreToClearNet?: string[];
     clearOnlyNet?: string[];
     preserveBoardOutline?: boolean;
+    items?: Array<'tracks' | 'vias' | 'zones'>;
+    strict?: boolean;
 };
 
 export type ClearPcbBoardResult = {
@@ -89,33 +81,6 @@ function trimClosingPoint(points: BoardPoint[]) {
     }
 
     return points;
-}
-
-function pointInPolygon(point: BoardPoint, polygon: BoardPoint[]) {
-    let inside = false;
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-        const a = polygon[i];
-        const b = polygon[j];
-        const intersects = ((a.y > point.y) !== (b.y > point.y)) &&
-            point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x;
-        if (intersects) inside = !inside;
-    }
-
-    return inside;
-}
-
-function polygonBounds(points: BoardPoint[]) {
-    return points.reduce((bounds, point) => ({
-        minX: Math.min(bounds.minX, point.x),
-        maxX: Math.max(bounds.maxX, point.x),
-        minY: Math.min(bounds.minY, point.y),
-        maxY: Math.max(bounds.maxY, point.y),
-    }), {
-        minX: Number.POSITIVE_INFINITY,
-        maxX: Number.NEGATIVE_INFINITY,
-        minY: Number.POSITIVE_INFINITY,
-        maxY: Number.NEGATIVE_INFINITY,
-    });
 }
 
 function normalizePolygonPoints(points: BoardPoint[]) {
@@ -209,14 +174,14 @@ function shouldClearPrimitive(primitive: PcbCleanupPrimitive, options: ClearPcbB
 }
 
 export async function clearCurrentPcbBoard(options: ClearPcbBoardOptions = {}): Promise<ClearPcbBoardResult> {
-    const groups: Array<[string, { api: PcbPrimitiveCleanupApi, filter?: (id: string) => boolean }]> = [
-        ["pour", { api: eda.pcb_PrimitivePour }],
-        ["fill", { api: eda.pcb_PrimitiveFill }],
-        ["region", { api: eda.pcb_PrimitiveRegion }],
-        ["via", { api: eda.pcb_PrimitiveVia }],
-        ["line", { api: eda.pcb_PrimitiveLine }],
-        ["arc", { api: eda.pcb_PrimitiveArc }],
-        ["polyline", { api: eda.pcb_PrimitivePolyline }],
+    const groups: Array<[string, 'tracks' | 'vias' | 'zones', { api: PcbPrimitiveCleanupApi, filter?: (id: string) => boolean }]> = [
+        ["pour", "zones", { api: eda.pcb_PrimitivePour }],
+        ["fill", "zones", { api: eda.pcb_PrimitiveFill }],
+        ["region", "zones", { api: eda.pcb_PrimitiveRegion }],
+        ["via", "vias", { api: eda.pcb_PrimitiveVia }],
+        ["line", "tracks", { api: eda.pcb_PrimitiveLine }],
+        ["arc", "tracks", { api: eda.pcb_PrimitiveArc }],
+        ["polyline", "tracks", { api: eda.pcb_PrimitivePolyline }],
         // ["string", eda.pcb_PrimitiveString],
         // ["attribute", eda.pcb_PrimitiveAttribute],
         // ["pad", { api: eda.pcb_PrimitivePad, filter: (id) => !id.startsWith('e') }],
@@ -232,50 +197,63 @@ export async function clearCurrentPcbBoard(options: ClearPcbBoardOptions = {}): 
         options.ignoreToClearNet?.length,
     );
 
-    for (const [name, api] of groups) {
+    for (const [name, item, api] of groups) {
+        if (options.items?.length && !options.items.includes(item)) continue;
         let ids: string[] = [];
 
         if (needsPrimitiveRead) {
             if (!api.api.getAll) {
-                warning(`PCB cleanup ${name} skipped: primitive filtering is not supported`);
+                const message = `PCB cleanup ${name} cannot filter primitives with this EasyEDA API`;
+                if (options.strict) throw new Error(message);
+                warning(`${message}; skipped`);
                 continue;
             }
 
-            const primitives = await withTimeout(
-                api.api.getAll(),
-                PCB_CLEAR_TIMEOUT_MS,
-                `PCB cleanup ${name} get timeout`,
-            ).catch(error => {
+            let primitives: Awaited<ReturnType<NonNullable<PcbPrimitiveCleanupApi['getAll']>>>;
+            try {
+                primitives = await withTimeout(
+                    api.api.getAll(),
+                    PCB_CLEAR_TIMEOUT_MS,
+                    `PCB cleanup ${name} get timeout`,
+                );
+            } catch (error) {
+                if (options.strict) throw error;
                 warning(`PCB cleanup ${name} get failed: ${(error as Error).message}`);
-                return [];
-            });
+                primitives = [];
+            }
 
             ids = primitives
                 .filter(primitive => shouldClearPrimitive(primitive, options))
                 .map(primitive => primitive.getState_PrimitiveId?.())
                 .filter((id): id is string => Boolean(id));
         } else {
-            ids = await withTimeout(
-                api.api.getAllPrimitiveId(),
-                PCB_CLEAR_TIMEOUT_MS,
-                `PCB cleanup ${name} get timeout`,
-            ).catch(error => {
+            try {
+                ids = await withTimeout(
+                    api.api.getAllPrimitiveId(),
+                    PCB_CLEAR_TIMEOUT_MS,
+                    `PCB cleanup ${name} get timeout`,
+                );
+            } catch (error) {
+                if (options.strict) throw error;
                 warning(`PCB cleanup ${name} get failed: ${(error as Error).message}`);
-                return [];
-            });
+                ids = [];
+            }
         }
 
         if (!ids.length) continue;
         if (api.filter) ids = ids.filter(api.filter)
 
-        await withTimeout(
-            api.api.delete(ids),
-            PCB_CLEAR_TIMEOUT_MS,
-            `PCB cleanup ${name} delete timeout`,
-        ).catch(error => {
+        try {
+            const removed = await withTimeout(
+                api.api.delete(ids),
+                PCB_CLEAR_TIMEOUT_MS,
+                `PCB cleanup ${name} delete timeout`,
+            );
+            if (options.strict && removed === false) throw new Error(`PCB cleanup ${name} delete returned false`);
+        } catch (error) {
+            if (options.strict) throw error;
             warning(`PCB cleanup ${name} delete failed: ${(error as Error).message}`);
-            return false;
-        });
+        }
         deleted[name] = (deleted[name] ?? 0) + ids.length;
 
         await yieldToEventLoop();
@@ -290,9 +268,10 @@ async function commitPrimitive<T extends DoneablePrimitive<T>>(primitive: T | un
     return await Promise.resolve(primitive.done());
 }
 
-async function commitPourCopperRegion(pour: IPCB_PrimitivePour) {
+async function commitPourCopperRegion(pour: IPCB_PrimitivePour, strict = false) {
     const poured = await pour.rebuildCopperRegion();
     if (!poured) {
+        if (strict) throw new Error(`PCB polygon copper rebuild returned empty region: ${pour.getState_Net()}`);
         warning(`PCB polygon copper rebuild returned empty region: ${pour.getState_Net()}`);
     } else if (poured.isAsync()) {
         await Promise.resolve(poured.done());
@@ -717,45 +696,139 @@ async function drawPolygons(polygons: BoardAssemble["polygons"]) {
 }
 
 export type RoutingCopperApplication = {
-    tracks?: BoardAssemble["tracks"];
-    vias?: BoardAssemble["vias"];
-    zones?: Array<{
+    clearRouting?: {
+        nets: 'all' | string[];
+        items: Array<'tracks' | 'vias' | 'zones'>;
+    };
+    tracks: Array<{
+        id?: string;
         net: string;
-        layer: "top" | "bottom";
-        points: Array<{ x: number; y: number }>;
+        layer: number;
+        widthMm: number;
+        points: BoardPoint[];
+    }>;
+    vias: Array<{
+        id?: string;
+        net: string;
+        x: number;
+        y: number;
+        diameterMm: number;
+        drillMm: number;
+    }>;
+    zones: Array<{
+        id?: string;
+        net: string;
+        layers: number[];
+        points: BoardPoint[];
         priority?: number;
         minThicknessMm?: number;
     }>;
 };
 
-/** Replace only router-owned copper in one checkpointed EasyEDA transaction. */
-export async function applyRoutingCopper(application: RoutingCopperApplication) {
-    await checkpointer.save(false);
-    await clearCurrentPcbBoard({ preserveBoardOutline: true });
-    await drawTracks(application.tracks);
-    await drawVias(application.vias);
-    for (const zone of application.zones ?? []) {
-        const points = normalizePolygonPoints(zone.points);
-        if (points.length < 3) continue;
-        const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(points));
-        if (!polygon) throw new Error(`invalid routing zone geometry: ${zone.net}`);
-        const pour = await createCommittedPour({
-            net: safeNetName(zone.net),
-            layer: layerToCopper(zone.layer),
-            polygon,
-            preserveSilos: false,
-            pourName: `copilot-router:${zone.net}`,
-            pourPriority: zone.priority ?? 0,
-            lineWidth: mmToMil(zone.minThicknessMm ?? DEFAULT_POUR_LINE_WIDTH_MM),
-        });
-        await commitPourCopperRegion(pour);
+function routingCopperLayer(value: number): TPCB_LayersOfCopper {
+    if (value === Number(EPCB_LayerId.TOP)) return EPCB_LayerId.TOP;
+    if (value === Number(EPCB_LayerId.BOTTOM)) return EPCB_LayerId.BOTTOM;
+    if (Number.isInteger(value) && value >= Number(EPCB_LayerId.INNER_1) && value <= Number(EPCB_LayerId.INNER_30)) {
+        return value as TPCB_LayersOfCopper;
     }
-    await refreshPcbState();
+    throw new Error(`Unsupported EasyEDA routing layer: ${value}`);
+}
+
+async function drawRoutingTracks(tracks: RoutingCopperApplication['tracks']) {
+    for (const track of tracks) {
+        const layer = routingCopperLayer(track.layer) as TPCB_LayersOfLine;
+        const width = validLengthMmToMil(track.widthMm, DEFAULT_POUR_LINE_WIDTH_MM);
+        const points = track.points.map(pointMmToPcbMil);
+        for (let index = 0; index < points.length - 1; index++) {
+            const start = points[index];
+            const end = points[index + 1];
+            if (samePoint(start, end)) continue;
+            await commitPrimitive(
+                await eda.pcb_PrimitiveLine.create(
+                    track.net,
+                    layer,
+                    start.x,
+                    start.y,
+                    end.x,
+                    end.y,
+                    width,
+                ),
+                `Failed to create routed track ${track.id ?? track.net}`,
+            );
+            await yieldToEventLoop();
+        }
+    }
+}
+
+async function drawRoutingVias(vias: RoutingCopperApplication['vias']) {
+    for (const via of vias) {
+        const drill = validLengthMmToMil(via.drillMm, MIN_COPPER_WIDTH_MM);
+        const diameter = Math.max(validLengthMmToMil(via.diameterMm, via.drillMm), drill);
+        await commitPrimitive(
+            await eda.pcb_PrimitiveVia.create(
+                via.net,
+                mmToMil(via.x),
+                mmToMil(via.y),
+                drill,
+                diameter,
+                EPCB_PrimitiveViaType.VIA,
+                null,
+                null,
+            ),
+            `Failed to create routed via ${via.id ?? via.net}`,
+        );
+        await yieldToEventLoop();
+    }
+}
+
+async function drawRoutingZones(zones: RoutingCopperApplication['zones']) {
+    for (const zone of zones) {
+        const points = normalizePolygonPoints(zone.points);
+        for (const layerValue of zone.layers) {
+            const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(points));
+            if (!polygon) throw new Error(`Invalid routing zone geometry: ${zone.id ?? zone.net}`);
+            const pour = await createCommittedPour({
+                net: zone.net,
+                layer: routingCopperLayer(layerValue),
+                polygon,
+                preserveSilos: false,
+                pourName: `copilot-router:${zone.id ?? zone.net}`,
+                pourPriority: zone.priority ?? 0,
+                lineWidth: mmToMil(zone.minThicknessMm ?? DEFAULT_POUR_LINE_WIDTH_MM),
+            });
+            await commitPourCopperRegion(pour, true);
+            await yieldToEventLoop();
+        }
+    }
+}
+
+/** Apply a validated router result after the caller has created one outer checkpoint. */
+export async function applyRoutingCopper(application: RoutingCopperApplication) {
+    const activeLayers = new Set((await getCopperLayers()).map(Number));
+    for (const layer of application.tracks.map(item => item.layer).concat(
+        application.zones.flatMap(item => item.layers),
+    )) {
+        if (!activeLayers.has(layer)) throw new Error(`Routing result targets inactive copper layer: ${layer}`);
+    }
+
+    const cleared = application.clearRouting ? await clearCurrentPcbBoard({
+        preserveBoardOutline: true,
+        strict: true,
+        items: [...application.clearRouting.items],
+        ...(application.clearRouting.nets === 'all'
+            ? {}
+            : { clearOnlyNet: [...application.clearRouting.nets] }),
+    }) : undefined;
+    await drawRoutingTracks(application.tracks);
+    await drawRoutingVias(application.vias);
+    await drawRoutingZones(application.zones);
+    await refreshPcbState(true);
     return {
         applied: true,
-        tracks: application.tracks?.length ?? 0,
-        vias: application.vias?.length ?? 0,
-        zones: application.zones?.length ?? 0,
+        cleared,
+        tracks: application.tracks.length,
+        vias: application.vias.length,
+        zones: application.zones.length,
     };
 }
 
@@ -776,219 +849,14 @@ async function getCopperLayers(): Promise<TPCB_LayersOfCopper[]> {
     return layers;
 }
 
-function copperLayerName(layer: TPCB_LayersOfCopper) {
-    if (layer === EPCB_LayerId.TOP) return "TOP";
-    if (layer === EPCB_LayerId.BOTTOM) return "BOTTOM";
-
-    return `INNER_${Number(layer) - Number(EPCB_LayerId.INNER_1) + 1}`;
-}
-
-async function removeOldDefaultGroundPours() {
-    const oldPours = await eda.pcb_PrimitivePour.getAll(DEFAULT_GND_NET).catch(() => []);
-    const targets = oldPours.filter(pour => pour.getState_PourName()?.startsWith(DEFAULT_GND_POUR_PREFIX));
-
-    if (targets.length) {
-        await eda.pcb_PrimitivePour.delete(targets).catch(error => {
-            warning(`PCB old GND pour cleanup failed: ${(error as Error).message}`);
-            return false;
-        });
-    }
-}
-
-async function drawDefaultGroundPours(board: BoardAssemble["board"]) {
-    if (!board) return;
-
-    const points = normalizePolygonPoints(board.polygon);
-    if (points.length < 3) {
-        warning("PCB default GND pour skipped: board polygon must contain at least 3 points");
-        return;
-    }
-
-    await removeOldDefaultGroundPours();
-
-    const layers = await getCopperLayers();
-    for (let i = 0; i < layers.length; i++) {
-        const layer = layers[i];
-        const layerName = copperLayerName(layer);
-
-        try {
-            const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(points));
-            if (!polygon) throw new Error("invalid board polygon geometry");
-
-            const pour = await createCommittedPour({
-                net: DEFAULT_GND_NET,
-                layer,
-                polygon,
-                preserveSilos: false,
-                pourName: safePrimitiveName(DEFAULT_GND_POUR_PREFIX, layerName),
-                pourPriority: i,
-                lineWidth: mmToMil(DEFAULT_POUR_LINE_WIDTH_MM),
-            });
-
-            await commitPourCopperRegion(pour);
-        } catch (error) {
-            warning(`PCB default GND pour failed ${layerName}: ${(error as Error).message}`);
-        }
-
-        await yieldToEventLoop();
-    }
-}
-
-async function removeOldDefaultGroundSutureVias() {
-    const oldVias = await eda.pcb_PrimitiveVia.getAll(DEFAULT_GND_NET, true).catch(() => []);
-    const targets = oldVias.filter(via => via.getState_ViaType() === EPCB_PrimitiveViaType.SUTURE);
-
-    if (targets.length) {
-        await eda.pcb_PrimitiveVia.delete(targets).catch(error => {
-            warning(`PCB old GND suture via cleanup failed: ${(error as Error).message}`);
-            return false;
-        });
-    }
-}
-
-function collectClearanceViolationObjectIds(drcResult: unknown) {
-    const ids = new Set<string>();
-    const categories = Array.isArray(drcResult) ? drcResult : [];
-
-    for (const category of categories) {
-        if (!category || typeof category !== "object") continue;
-        const rawCategory = category as Record<string, unknown>;
-        if (rawCategory.name !== "Clearance Error") continue;
-
-        const groups = Array.isArray(rawCategory.list) ? rawCategory.list : [];
-        for (const group of groups) {
-            if (!group || typeof group !== "object") continue;
-            const rawGroup = group as Record<string, unknown>;
-            const items = Array.isArray(rawGroup.list) ? rawGroup.list : [];
-
-            for (const item of items) {
-                if (!item || typeof item !== "object") continue;
-                const rawItem = item as Record<string, unknown>;
-
-                if (Array.isArray(rawItem.objs)) {
-                    for (const obj of rawItem.objs) {
-                        if (typeof obj === "string") ids.add(obj);
-                    }
-                }
-
-                const explanation = rawItem.explanation;
-                const errData = explanation && typeof explanation === "object"
-                    ? (explanation as Record<string, unknown>).errData
-                    : undefined;
-                if (errData && typeof errData === "object") {
-                    const rawErrData = errData as Record<string, unknown>;
-                    if (typeof rawErrData.obj1 === "string") ids.add(rawErrData.obj1);
-                    if (typeof rawErrData.obj2 === "string") ids.add(rawErrData.obj2);
-                }
-            }
-        }
-    }
-
-    return ids;
-}
-
-async function deleteGroundSutureViasWithClearanceErrors(createdViaIds: Set<string>) {
-    if (!createdViaIds.size) return 0;
-
-    const drcResult = await eda.pcb_Drc.check(true, true, true).catch(error => {
-        warning(`PCB GND suture via DRC post-clean skipped: ${(error as Error).message}`);
-        return [];
-    });
-    const violationIds = collectClearanceViolationObjectIds(drcResult);
-    const deleteIds = [...createdViaIds].filter(id => violationIds.has(id));
-
-    if (!deleteIds.length) return 0;
-
-    const deleted = await eda.pcb_PrimitiveVia.delete(deleteIds).catch(error => {
-        warning(`PCB GND suture via DRC post-clean delete failed: ${(error as Error).message}`);
-        return false;
-    });
-
-    if (!deleted) return 0;
-
-    eda.sys_Log.add(`PCB GND suture via DRC post-clean deleted: ${deleteIds.length}`, ESYS_LogType.INFO);
-    return deleteIds.length;
-}
-
-async function drawDefaultGroundSutureVias(board: BoardAssemble["board"], options: GroundSutureOptions = {}) {
-    if (!board) return { created: 0, skipped: true };
-
-    const points = normalizePolygonPoints(board.polygon);
-    if (points.length < 3) {
-        warning("PCB GND suture vias skipped: board polygon must contain at least 3 points");
-        return { created: 0, skipped: true };
-    }
-
-    await removeOldDefaultGroundSutureVias();
-
-    const gridMm = validLengthMm(options.gridMm, 4);
-    const drillMm = validLengthMm(options.drillMm, 0.305);
-    const diameterMm = Math.max(validLengthMm(options.diameterMm, 0.61), drillMm);
-    const edgeMarginMm = Math.max(0, Number.isFinite(options.edgeMarginMm) ? options.edgeMarginMm! : 1);
-    const maxCount = Math.max(0, Math.floor(Number.isFinite(options.maxCount) ? options.maxCount! : 500));
-    const bounds = polygonBounds(points);
-    const drill = mmToMil(drillMm);
-    const diameter = mmToMil(diameterMm);
-    const createdViaIds = new Set<string>();
-    let created = 0;
-
-    outer: for (let x = bounds.minX + edgeMarginMm; x <= bounds.maxX - edgeMarginMm; x += gridMm) {
-        for (let y = bounds.minY + edgeMarginMm; y <= bounds.maxY - edgeMarginMm; y += gridMm) {
-            if (created >= maxCount) break outer;
-            if (!pointInPolygon({ x, y }, points)) continue;
-
-            try {
-                const via = await eda.pcb_PrimitiveVia.create(
-                    DEFAULT_GND_NET,
-                    mmToMil(x),
-                    mmToMil(y),
-                    drill,
-                    diameter,
-                    EPCB_PrimitiveViaType.SUTURE
-                );
-                if (!via) throw new Error('Failed create via')
-                createdViaIds.add(via.getState_PrimitiveId());
-                created++;
-            } catch (error) {
-                warning(`PCB GND suture via failed: ${(error as Error).message}`);
-            }
-
-            await yieldToEventLoop();
-        }
-    }
-
-    eda.sys_Log.add(`Create vias: ${created}; ${JSON.stringify(createdViaIds)}`, ESYS_LogType.INFO);
-    const deletedByDrc = await deleteGroundSutureViasWithClearanceErrors(createdViaIds);
-    return { created, deletedByDrc, skipped: false };
-}
-
-export async function pourDefaultGroundAndSutureVias(board: BoardAssemble["board"], options: {
-    pourGround?: boolean;
-    sutureGround?: boolean;
-    suture?: GroundSutureOptions;
-} = {}) {
-    const pourGround = options.pourGround ?? true;
-    const sutureGround = options.sutureGround ?? true;
-    const result: { poured?: boolean; suture?: Awaited<ReturnType<typeof drawDefaultGroundSutureVias>> } = {};
-
-    if (pourGround) {
-        await drawDefaultGroundPours(board);
-        result.poured = true;
-    }
-
-    if (sutureGround) {
-        result.suture = await drawDefaultGroundSutureVias(board, options.suture);
-    }
-
-    await refreshPcbState();
-    return result;
-}
-
-async function refreshPcbState() {
-    await eda.pcb_Document.startCalculatingRatline().catch(error => {
+async function refreshPcbState(strict = false) {
+    try {
+        const refreshed = await eda.pcb_Document.startCalculatingRatline();
+        if (strict && refreshed === false) throw new Error('PCB ratline recalculation returned false');
+    } catch (error) {
+        if (strict) throw error;
         warning(`PCB ratline recalculation failed: ${(error as Error).message}`);
-        return false;
-    });
+    }
 }
 
 function delay(ms: number) {

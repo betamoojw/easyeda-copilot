@@ -13,15 +13,17 @@ export default defineConfig({
         'src/index.ts',
         'src/pcb-preview/cli.ts',
         'src/pcb-preview/index.ts',
+        'src/operations/manager.ts',
         'src/routing/easyeda-autoroute-adapter.ts',
         'src/routing/easyeda-drc-adapter.ts',
-        'src/routing/run-easyeda-routing.ts',
     ],
     format: ['esm'],
     clean: true,
     dts: false,
     sourcemap: false,
-    noExternal: ['@modelcontextprotocol/sdk', '@copilot/shared', '@easyeda-copilot/router'],
+    // Keep eda-copilot-router external so its package-relative KRT assets remain
+    // discoverable after easyeda-copilot-mcp is installed from npm.
+    noExternal: ['@modelcontextprotocol/sdk', '@copilot/shared'],
     esbuildPlugins: [
         {
             name: 'mcp-sdk-extensionless-imports',
