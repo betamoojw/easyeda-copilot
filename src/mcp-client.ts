@@ -768,16 +768,87 @@ async function routingTransactionStep<T>(stage: string, action: () => Promise<T>
     }
 }
 
+function isSaveableDocumentType(documentType: EDMT_EditorDocumentType) {
+    return documentType === EDMT_EditorDocumentType.SCHEMATIC_PAGE
+        || documentType === EDMT_EditorDocumentType.PCB
+        || documentType === EDMT_EditorDocumentType.PANEL;
+}
+
+async function saveActiveDocument(documentType: EDMT_EditorDocumentType) {
+    if (documentType === EDMT_EditorDocumentType.SCHEMATIC_PAGE) {
+        return eda.sch_Document.save();
+    }
+
+    if (documentType === EDMT_EditorDocumentType.PCB) {
+        return eda.pcb_Document.save();
+    }
+
+    if (documentType === EDMT_EditorDocumentType.PANEL) {
+        return eda.pnl_Document.save();
+    }
+
+    throw new Error(`Unsupported document type for saving: ${documentType}`);
+}
+
 async function saveCurrentDocument(document: IDMT_EditorDocumentItem) {
-    if (document.documentType === EDMT_EditorDocumentType.SCHEMATIC_PAGE) {
-        return await eda.sch_Document.save();
+    return saveActiveDocument(document.documentType);
+}
+
+function getOpenEditorTabs(tree: IDMT_EditorSplitScreenItem | undefined): IDMT_EditorTabItem[] {
+    if (!tree) return [];
+    return [
+        ...(tree.tabs ?? []),
+        ...(tree.children ?? []).flatMap(getOpenEditorTabs),
+    ];
+}
+
+async function saveAllOpenDocuments() {
+    const originalDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => undefined);
+    const splitScreenTree = await eda.dmt_EditorControl.getSplitScreenTree();
+    const seenTabIds = new Set<string>();
+    const tabs = getOpenEditorTabs(splitScreenTree).filter(tab => {
+        if (!isSaveableDocumentType(tab.documentType) || seenTabIds.has(tab.tabId)) return false;
+        seenTabIds.add(tab.tabId);
+        return true;
+    });
+
+    if (!tabs.length && originalDocument && isSaveableDocumentType(originalDocument.documentType)) {
+        const saved = await saveCurrentDocument(originalDocument);
+        if (!saved) throw new Error(`Failed to save current document: ${originalDocument.uuid}`);
+        return [{
+            tab_id: originalDocument.tabId,
+            document_uuid: originalDocument.uuid,
+            document_type: originalDocument.documentType,
+        }];
     }
 
-    if (document.documentType === EDMT_EditorDocumentType.PCB) {
-        return await eda.pcb_Document.save(document.uuid);
+    const savedDocuments: Array<{
+        tab_id: string;
+        title: string;
+        document_type: EDMT_EditorDocumentType;
+    }> = [];
+
+    try {
+        for (const tab of tabs) {
+            const activated = await eda.dmt_EditorControl.activateDocument(tab.tabId);
+            if (!activated) throw new Error(`Failed to activate document before saving: ${tab.title}`);
+            await delay(50);
+
+            const saved = await saveActiveDocument(tab.documentType);
+            if (!saved) throw new Error(`Failed to save document before switching projects: ${tab.title}`);
+            savedDocuments.push({
+                tab_id: tab.tabId,
+                title: tab.title,
+                document_type: tab.documentType,
+            });
+        }
+    } finally {
+        if (originalDocument?.tabId) {
+            await eda.dmt_EditorControl.activateDocument(originalDocument.tabId).catch(() => false);
+        }
     }
 
-    throw new Error(`Unsupported current document type for sync: ${document.documentType}`);
+    return savedDocuments;
 }
 
 function clearHeartbeatTimeout() {
@@ -902,6 +973,100 @@ async function getProjectInfo() {
         project_name: projectInfo.friendlyName,
         description: projectInfo.description
     };
+}
+
+type ProjectTreeFolder = {
+    type: 'folder';
+    uuid: string;
+    name: string;
+    folders: ProjectTreeFolder[];
+    projects: ProjectTreeProject[];
+};
+
+type ProjectTreeProject = {
+    type: 'project';
+    uuid: string;
+    name: string;
+};
+
+type ProjectTreeTeam = {
+    type: 'team';
+    uuid: string;
+    name: string;
+    folders: ProjectTreeFolder[];
+    projects: ProjectTreeProject[];
+};
+
+async function getAllProjectsTree(): Promise<ProjectTreeTeam[]> {
+    const teams = await eda.dmt_Team.getAllTeamsInfo();
+    const result: ProjectTreeTeam[] = [];
+
+    for (const team of teams) {
+        const folderUuids = await eda.dmt_Folder.getAllFoldersUuid(team.uuid);
+        const projectUuids = await eda.dmt_Project.getAllProjectsUuid(team.uuid);
+        const folders: IDMT_FolderItem[] = [];
+        const projects: IDMT_BriefProjectItem[] = [];
+
+        for (const uuid of folderUuids) {
+            const folder = await eda.dmt_Folder.getFolderInfo(team.uuid, uuid);
+            if (folder) folders.push(folder);
+        }
+
+        for (const uuid of projectUuids) {
+            const project = await eda.dmt_Project.getProjectInfo(uuid);
+            if (project) projects.push(project);
+        }
+
+        const folderMap = new Map<string, ProjectTreeFolder>();
+        for (const folder of folders) {
+            folderMap.set(folder.uuid, {
+                type: 'folder',
+                uuid: folder.uuid,
+                name: folder.name,
+                folders: [],
+                projects: [],
+            });
+        }
+
+        const root: ProjectTreeTeam = {
+            type: 'team',
+            uuid: team.uuid,
+            name: team.name,
+            folders: [],
+            projects: [],
+        };
+
+        for (const folder of folders) {
+            const node = folderMap.get(folder.uuid)!;
+            if (!folder.parentFolderUuid || folder.parentFolderUuid === team.uuid) {
+                root.folders.push(node);
+                continue;
+            }
+
+            const parent = folderMap.get(folder.parentFolderUuid);
+            (parent?.folders ?? root.folders).push(node);
+        }
+
+        for (const project of projects) {
+            const node: ProjectTreeProject = {
+                type: 'project',
+                uuid: project.uuid,
+                name: project.friendlyName,
+            };
+
+            if (!project.folderUuid || project.folderUuid === team.uuid) {
+                root.projects.push(node);
+                continue;
+            }
+
+            const folder = folderMap.get(project.folderUuid);
+            (folder?.projects ?? root.projects).push(node);
+        }
+
+        result.push(root);
+    }
+
+    return result;
 }
 
 async function sendEasyEdaHello(connectionEpoch: number) {
@@ -1120,6 +1285,70 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             return;
         }
 
+        if (message.event === 'get-all-projects') {
+            reply(true, await getAllProjectsTree());
+            return;
+        }
+
+        if (message.event === 'create-project') {
+            const projectFriendlyName = typeof body.projectFriendlyName === 'string'
+                ? body.projectFriendlyName.trim()
+                : '';
+            if (!projectFriendlyName) throw new Error('Missing projectFriendlyName');
+
+            const projectName = typeof body.projectName === 'string'
+                ? body.projectName.trim()
+                : undefined;
+            if (projectName !== undefined && !/^[A-Za-z0-9-]+$/.test(projectName)) {
+                throw new Error('Invalid projectName: use only ASCII letters, digits, and hyphens');
+            }
+
+            const teamUuid = typeof body.teamUuid === 'string' ? body.teamUuid.trim() : undefined;
+            const folderUuid = typeof body.folderUuid === 'string' ? body.folderUuid.trim() : undefined;
+            const description = typeof body.description === 'string' ? body.description.trim() : undefined;
+            if (body.teamUuid !== undefined && !teamUuid) throw new Error('Invalid teamUuid');
+            if (body.folderUuid !== undefined && !folderUuid) throw new Error('Invalid folderUuid');
+
+            const projectUuid = await eda.dmt_Project.createProject(
+                projectFriendlyName,
+                projectName,
+                teamUuid,
+                folderUuid,
+                description,
+            );
+            if (!projectUuid) throw new Error('EasyEDA failed to create the project');
+
+            reply(true, {
+                created: true,
+                project_uuid: projectUuid,
+                project_friendly_name: projectFriendlyName,
+                ...(projectName === undefined ? {} : { project_name: projectName }),
+                ...(teamUuid === undefined ? {} : { team_uuid: teamUuid }),
+                ...(folderUuid === undefined ? {} : { folder_uuid: folderUuid }),
+                ...(description === undefined ? {} : { description }),
+            });
+            return;
+        }
+
+        if (message.event === 'open-project') {
+            const projectUuid = typeof body.projectUuid === 'string'
+                ? body.projectUuid.trim()
+                : '';
+            if (!projectUuid) throw new Error('Missing projectUuid');
+
+            const savedDocuments = await saveAllOpenDocuments();
+            const opened = await eda.dmt_Project.openProject(projectUuid);
+            if (!opened) throw new Error(`EasyEDA failed to open project: ${projectUuid}`);
+
+            reply(true, {
+                opened: true,
+                project_uuid: projectUuid,
+                saved_documents: savedDocuments,
+                next_step: 'Call get_current_project_info after EasyEDA finishes opening the project.',
+            });
+            return;
+        }
+
         if (message.event === 'open-document') {
             const documentUuid = body.documentUuid;
             if (typeof documentUuid !== 'string' || !documentUuid) {
@@ -1130,6 +1359,22 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             if (!tabId) throw new Error(`Failed to open document: ${documentUuid}`);
 
             reply(true, { tabId, documentUuid });
+            return;
+        }
+
+        if (message.event === 'save-document') {
+            const document = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+            if (!document) throw new Error('Current document info not found');
+
+            const saved = await saveCurrentDocument(document);
+            if (!saved) throw new Error(`Failed to save current document: ${document.uuid}`);
+
+            reply(true, {
+                saved: true,
+                document_uuid: document.uuid,
+                document_type: document.documentType,
+                tab_id: document.tabId,
+            });
             return;
         }
 

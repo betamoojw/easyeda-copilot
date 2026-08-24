@@ -10,6 +10,7 @@ import { registerDocsTools } from './tools/docs';
 import { registerDrcTools } from './tools/drc';
 import { registerEasyEdaInstancesTools } from './tools/easyeda-instances';
 import { registerOperationTools } from './tools/operations';
+import { registerProjectTools } from './tools/projects';
 import { DOCS_DIR, SKILL_DOC_PATH } from './utils/dirs';
 
 const MCP_WS_PORT = Number(process.env.EASYEDA_COPILOT_MCP_WS_PORT || 8787);
@@ -79,6 +80,7 @@ async function main() {
     registerDrcTools(server, bridge);
     registerEasyEdaInstancesTools(server, bridge);
     registerOperationTools(server);
+    registerProjectTools(server, bridge);
 
     const transport = new StdioServerTransport();
 

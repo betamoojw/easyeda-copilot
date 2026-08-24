@@ -16,6 +16,8 @@ export default defineConfig({
         'src/operations/manager.ts',
         'src/routing/easyeda-autoroute-adapter.ts',
         'src/routing/easyeda-drc-adapter.ts',
+        'src/tools/projects.ts',
+        'src/tools/docs.ts',
     ],
     format: ['esm'],
     clean: true,
