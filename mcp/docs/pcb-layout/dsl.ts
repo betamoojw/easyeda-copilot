@@ -125,13 +125,13 @@ declare const board: {
 };
 
 interface PreserveOptions {
-  /** Use the current EasyEDA PCB Board Outline. */
+  /** Use existingPlacement.board as the board outline. */
   board?: boolean;
-  /** Preserve explicit components, or every current component whose center is inside the board outline. */
+  /** Preserve explicit components, or every existing component whose center is inside existingPlacement.board.polygon. */
   components?: "all" | string[];
 }
 
-/** Preserve positions loaded from the currently open EasyEDA PCB. */
+/** Preserve positions supplied by the PCB client in existingPlacement. */
 declare function preserve(options: PreserveOptions): void;
 
 interface BoardHoleOptions {
@@ -172,20 +172,20 @@ interface BoardPadHoleOptions {
 
 type BoardPadCell =
   | {
-    name: string;
-    net: string;
-    shape: "round";
-    diameter: number;
-    hole?: BoardPadHoleOptions;
-  }
+      name: string;
+      net: string;
+      shape: "round";
+      diameter: number;
+      hole?: BoardPadHoleOptions;
+    }
   | {
-    name: string;
-    net: string;
-    shape: "rect" | "oval";
-    width: number;
-    height: number;
-    hole?: BoardPadHoleOptions;
-  };
+      name: string;
+      net: string;
+      shape: "rect" | "oval";
+      width: number;
+      height: number;
+      hole?: BoardPadHoleOptions;
+    };
 
 interface BoardPadOptions {
   /** Fixed board anchor for the synthetic pad group. */
@@ -206,6 +206,47 @@ interface BoardPadOptions {
 
 /** Create a synthetic fixed component made from external board pads/test pads/header pads. Exported as BoardAssemble.pads, not components[]. */
 declare function boardPad(name: string, options: BoardPadOptions): void;
+
+interface SolderJumperOptions {
+  /** Exactly 2 or 3 distinct nets; pad count is inferred from this array. */
+  nets: string[];
+  /** Configuration jumpers use compact hand-solder pads; power jumpers scale from current. Default configuration. */
+  usage?: "configuration" | "power";
+  /** Expected current in amperes for usage:"power". */
+  current?: number;
+  /** Copper side. Default top. */
+  layer?: Layer;
+  /** Optional placement block. A dedicated block is created when omitted. */
+  block?: string;
+  /** Optional fixed board anchor. When omitted, the jumper is auto-placed as an ordinary synthetic footprint. */
+  at?: Extract<TargetRef, { type: "board_anchor" }>;
+  offset?: { x?: number; y?: number };
+}
+
+/** Create a non-BOM 2/3-pad solder jumper without encoding an assembled state. Pad geometry is derived from intent and fabrication defaults. */
+declare function solderJumper(name: string, options: SolderJumperOptions): void;
+
+interface ThermalPadOptions {
+  /** Real exposed-pad pin to augment before auto-place. Net and local position are inferred from the resolved footprint. */
+  at: Extract<TargetRef, { type: "pin" }>;
+  power: {
+    /** Dissipated power in watts. */
+    dissipation: number;
+    /** Allowed PCB temperature rise in degrees Celsius. */
+    maxTemperatureRise: number;
+  };
+  /** Optional package junction-to-exposed-pad thermal resistance in °C/W. When omitted, V1 estimates it from exposed-pad area and reports the assumption. */
+  thetaJC?: number;
+  limits?: {
+    /** Maximum opposite-layer copper spreading area. Thermal vias always remain clipped to the real pad. */
+    maxSize?: { width: number; height: number };
+  };
+}
+
+declare const primitive: {
+  /** Add a calculated via matrix inside an existing real exposed pad before auto-place. */
+  thermalPad(name: string, options: ThermalPadOptions): void;
+};
 
 interface ComponentGridOptions {
   /** Absolute board coordinate of matrix[0][0]. Board origin is center. Use either origin or at, not both. */
@@ -304,7 +345,7 @@ interface ComponentBuilder {
   faceAt0(direction: MechanicalFaceDirection): ComponentBuilder;
   /** Hard-constrain rotation so the component's mechanical face points to this board direction. Use for USB/connectors/buttons/displays. */
   faceTo(direction: MechanicalFaceDirection): ComponentBuilder;
-  /** Mount a mechanical component on a board edge with real overhang outside the board. Use for USB/ports only, not ordinary buttons. */
+  /** Mount a mechanical component on a board edge. Computes fixed center, face direction, and board overflow from the real footprint bbox after rotation. Prefer this for USB/ports/buttons on edges instead of fixed()+offset+boardOverflow. */
   edgeMount(edge: BoardEdge, options?: EdgeMountOptions): ComponentBuilder;
   /** Place a mechanical component near one or more board edges while keeping it inside the board. Use for buttons/LEDs/side controls. If face auto-detection is wrong, call faceAt0(...) before this. */
   edgePlace(edgeOrEdges: BoardEdge | BoardEdge[], options?: EdgePlaceOptions): ComponentBuilder;
@@ -385,6 +426,7 @@ interface EdgePlaceOptions {
 
 /** Place mechanical components near board edge(s) but inside the board. Use for buttons, LEDs, side-access connectors, and edge controls. Not for USB/ports that must overhang; use edgeMount for those. */
 declare function edgePlace(designators: string | string[], options: EdgePlaceOptions): void;
+
 /** Lock a component to an exact/anchor-relative board position. Allowed only for role("connector") mechanical parts. */
 declare function fixed(designator: string, options: FixedPlacementOptions): void;
 /** Global helper equivalent to component(designator).edgeMount(edge, options). */

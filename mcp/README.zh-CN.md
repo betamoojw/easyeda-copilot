@@ -23,6 +23,7 @@ PCB 功能仅可通过 MCP 客户端使用，无法通过内置的 Copilot 聊�
 
 MCP 集成可以实现：
 - 从原理图生成板框轮廓和元件布局；
+- 在增量布局时保留已打开 PCB 的板框和选定现有元件的位置；
 - 在导入前创建机械约束和最终布局预览；
 - 将确认的布局组装到已打开的 EasyEDA PCB 文档中；
 - 通过托管 KRT 后端运行 `eda-copilot-router` DSL；
@@ -31,7 +32,7 @@ MCP 集成可以实现：
 - 预览和检查 PCB 对象、网络（nets）和元件；
 - 运行 EasyEDA PCB DRC 并管理铜层数量。
 
-典型工作流：查看机械预览，确认最终布局，将其导入目标 PCB 文档，然后运行 `run_pcb_router_dsl` 并检查原生 DRC。默认保留现有铜箔；完整或选择性重新布线应在同一个 DSL 中使用 `clearRouting(...)`。长时间运行的布局和布线任务统一使用 `wait_operation` 继续等待。
+典型工作流：同步原理图更改，暂停并等待用户在 EasyEDA 导入对话框中手动确认，打开目标 PCB，检查机械和最终布局预览，组装已确认的布局，然后运行 `run_pcb_router_dsl` 并检查原生 DRC。布局 DSL 可通过 `preserve(...)` 保留现有布局；默认保留现有铜箔，只有布线 DSL 明确调用 `clearRouting(...)` 时才会替换。长时间运行的操作通过 `wait_operation` 继续等待。
 
 ## 构建
 ```bash
