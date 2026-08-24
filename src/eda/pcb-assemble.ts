@@ -287,39 +287,32 @@ async function createCommittedPour(args: {
     pourPriority: number;
     lineWidth: number;
 }) {
-    try {
-        return await commitPrimitive(
-            await eda.pcb_PrimitivePour.create(
-                args.net,
-                args.layer,
-                args.polygon,
-                EPCB_PrimitivePourFillMethod.SOLID,
-                args.preserveSilos,
-                args.pourName,
-                args.pourPriority,
-                args.lineWidth,
-                false,
-            ),
-            "create returned undefined",
+    const create = async (pourName: string | undefined, message: string) => {
+        const pour = await eda.pcb_PrimitivePour.create(
+            args.net,
+            args.layer,
+            args.polygon,
+            EPCB_PrimitivePourFillMethod.SOLID,
+            args.preserveSilos,
+            pourName,
+            args.pourPriority,
+            args.lineWidth,
+            false,
         );
+        if (!pour) throw new Error(message);
+        return pour;
+    };
+
+    try {
+        return await create(args.pourName, 'create returned undefined');
     } catch (firstError) {
         eda.sys_Log.add(
             `PCB pour create retry without pourName: ${args.net}: ${(firstError as Error).message}`,
             ESYS_LogType.WARNING,
         );
 
-        return await commitPrimitive(
-            await eda.pcb_PrimitivePour.create(
-                args.net,
-                args.layer,
-                args.polygon,
-                EPCB_PrimitivePourFillMethod.SOLID,
-                args.preserveSilos,
-                undefined,
-                args.pourPriority,
-                args.lineWidth,
-                false,
-            ),
+        return await create(
+            undefined,
             `create returned undefined after retry: ${(firstError as Error).message}`,
         );
     }
@@ -744,18 +737,17 @@ async function drawRoutingTracks(tracks: RoutingCopperApplication['tracks']) {
             const start = points[index];
             const end = points[index + 1];
             if (samePoint(start, end)) continue;
-            await commitPrimitive(
-                await eda.pcb_PrimitiveLine.create(
-                    track.net,
-                    layer,
-                    start.x,
-                    start.y,
-                    end.x,
-                    end.y,
-                    width,
-                ),
-                `Failed to create routed track ${track.id ?? track.net}`,
+            const primitive = await eda.pcb_PrimitiveLine.create(
+                track.net,
+                layer,
+                start.x,
+                start.y,
+                end.x,
+                end.y,
+                width,
+                false,
             );
+            if (!primitive) throw new Error(`Failed to create routed track ${track.id ?? track.net}`);
             await yieldToEventLoop();
         }
     }
@@ -767,20 +759,18 @@ async function drawRoutingVias(vias: RoutingCopperApplication['vias']) {
         const diameter = Math.max(validLengthMmToMil(via.diameterMm, via.drillMm), drill);
         const label = via.id ?? `${via.net} #${index + 1}`;
         try {
-            await commitPrimitive(
-                await eda.pcb_PrimitiveVia.create(
-                    via.net,
-                    mmToMil(via.x),
-                    mmToMil(via.y),
-                    drill,
-                    diameter,
-                    EPCB_PrimitiveViaType.VIA,
-                    null,
-                    {},
-                    false,
-                ),
-                `Failed to create routed via ${label}`,
+            const primitive = await eda.pcb_PrimitiveVia.create(
+                via.net,
+                mmToMil(via.x),
+                mmToMil(via.y),
+                drill,
+                diameter,
+                EPCB_PrimitiveViaType.VIA,
+                null,
+                {},
+                false,
             );
+            if (!primitive) throw new Error(`Failed to create routed via ${label}`);
         } catch (error) {
             throw new Error(
                 `Failed to create routed via ${label}: ${error instanceof Error ? error.message : String(error)}`,
