@@ -689,6 +689,7 @@ async function drawPolygons(polygons: BoardAssemble["polygons"]) {
 }
 
 export type RoutingCopperApplication = {
+    copperLayerCount?: number;
     clearRouting?: {
         nets: 'all' | string[];
         items: Array<'tracks' | 'vias' | 'zones'>;
@@ -717,6 +718,33 @@ export type RoutingCopperApplication = {
         minThicknessMm?: number;
     }>;
 };
+
+type SupportedCopperLayerCount = 2 | 4 | 6 | 8 | 10 | 12 | 14 | 16 | 18 | 20 | 22 | 24 | 26 | 28 | 30 | 32;
+
+function supportedCopperLayerCount(value: number): SupportedCopperLayerCount {
+    if (Number.isInteger(value) && value >= 2 && value <= 32 && value % 2 === 0) {
+        return value as SupportedCopperLayerCount;
+    }
+    throw new Error(`Unsupported PCB copper layer count: ${value}. Expected an even number from 2 to 32.`);
+}
+
+async function applyRoutingCopperLayerCount(requestedValue?: number) {
+    if (requestedValue === undefined) return undefined;
+
+    const requested = supportedCopperLayerCount(requestedValue);
+    const previous = await eda.pcb_Layer.getTheNumberOfCopperLayers();
+    if (previous === requested) return { requested, previous, actual: previous, changed: false };
+
+    const success = await eda.pcb_Layer.setTheNumberOfCopperLayers(requested);
+    if (!success) throw new Error(`EasyEDA rejected PCB copper layer count ${requested}`);
+    await yieldToEventLoop();
+
+    const actual = await eda.pcb_Layer.getTheNumberOfCopperLayers();
+    if (actual !== requested) {
+        throw new Error(`EasyEDA reported ${actual} copper layers after requesting ${requested}`);
+    }
+    return { requested, previous, actual, changed: true };
+}
 
 function routingCopperLayer(value: number): TPCB_LayersOfCopper {
     if (value === Number(EPCB_LayerId.TOP)) return EPCB_LayerId.TOP;
@@ -861,6 +889,10 @@ async function routingApplicationStep<T>(stage: string, action: () => Promise<T>
 
 /** Apply a validated router result after the caller has created one outer checkpoint. */
 export async function applyRoutingCopper(application: RoutingCopperApplication) {
+    const copperLayerCount = await routingApplicationStep(
+        'copper layer count application',
+        () => applyRoutingCopperLayerCount(application.copperLayerCount),
+    );
     const activeLayers = new Set((await routingApplicationStep(
         'layer validation',
         getCopperLayers,
@@ -886,6 +918,7 @@ export async function applyRoutingCopper(application: RoutingCopperApplication) 
     const zoneRebuild = await routingApplicationStep('zone rebuild', () => rebuildRoutingZones(pendingZones));
     return {
         applied: true,
+        copperLayerCount,
         cleared,
         tracks: application.tracks.length,
         vias: application.vias.length,

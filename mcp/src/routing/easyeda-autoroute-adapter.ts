@@ -26,6 +26,7 @@ export type EasyEdaAutorouteImport = Readonly<{
 }>;
 
 export type EasyEdaRoutingApplication = Readonly<{
+    copperLayerCount?: number;
     clearRouting?: RoutingClearIntent;
     tracks: readonly Readonly<{
         id?: string;
@@ -477,12 +478,26 @@ function toEasyEdaPoint(pointValue: PointMm) {
 
 export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEdaRoutingApplication {
     const diagnostics: RoutingDiagnostic[] = [];
-    if (result.stackup?.applyRequested) diagnostics.push({
-        code: 'EASYEDA_STACKUP_APPLY_UNSUPPORTED',
-        severity: 'error',
-        message: 'EasyEDA Copilot cannot persist a physical router stackup with the currently available EasyEDA API.',
-    });
+    let copperLayerCount: number | undefined;
+    if (result.stackup?.applyRequested) {
+        const requested = result.stackup.effective.layers.filter(layer => layer.kind === 'copper').length;
+        if (requested < 2 || requested > 32 || requested % 2 !== 0) {
+            diagnostics.push({
+                code: 'EASYEDA_STACKUP_COPPER_LAYER_COUNT_UNSUPPORTED',
+                severity: 'error',
+                message: `EasyEDA requires an even copper layer count from 2 to 32; router requested ${requested}.`,
+            });
+        } else {
+            copperLayerCount = requested;
+            diagnostics.push({
+                code: 'EASYEDA_STACKUP_LAYER_COUNT_ONLY',
+                severity: 'warning',
+                message: `EasyEDA will apply the ${requested}-layer copper count; physical thickness and material properties remain managed by the open board.`,
+            });
+        }
+    }
     if (!result.copper) return {
+        ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
         tracks: [],
         vias: [],
         zones: [],
@@ -557,6 +572,7 @@ export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEd
         }];
     });
     return {
+        ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
         ...(result.clearRouting ? { clearRouting: result.clearRouting } : {}),
         tracks: traces,
         vias,

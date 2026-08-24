@@ -95,6 +95,46 @@ assert.deepEqual(application.tracks[0].points, [[1, 3], [2, 3]]);
 assert.deepEqual(application.vias[0].location, [2, 3]);
 assert.equal(application.diagnostics.length, 0);
 
+const stackupApplication = adapter.routingResultToEasyEdaApplication({
+    status: 'complete', operation: 'apply-stackup',
+    rules: { effective: imported.board.rules, applyRequested: false, overriddenFields: [] },
+    stackup: {
+        applyRequested: true,
+        effective: {
+            layers: [
+                { kind: 'copper', layer: 'F.Cu', thicknessMm: 0.035 },
+                { kind: 'dielectric', name: 'Core', thicknessMm: 1.5, relativePermittivity: 4.2 },
+                { kind: 'copper', layer: 'B.Cu', thicknessMm: 0.035 },
+            ],
+        },
+    },
+    diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
+});
+assert.equal(stackupApplication.copperLayerCount, 2);
+assert.equal(stackupApplication.diagnostics[0].code, 'EASYEDA_STACKUP_LAYER_COUNT_ONLY');
+assert.equal(stackupApplication.diagnostics[0].severity, 'warning');
+
+const invalidStackupApplication = adapter.routingResultToEasyEdaApplication({
+    status: 'complete', operation: 'apply-stackup',
+    rules: { effective: imported.board.rules, applyRequested: false, overriddenFields: [] },
+    stackup: {
+        applyRequested: true,
+        effective: {
+            layers: [
+                { kind: 'copper', layer: 'F.Cu', thicknessMm: 0.035 },
+                { kind: 'dielectric', name: 'Core 1', thicknessMm: 0.7 },
+                { kind: 'copper', layer: 'In1.Cu', thicknessMm: 0.035 },
+                { kind: 'dielectric', name: 'Core 2', thicknessMm: 0.7 },
+                { kind: 'copper', layer: 'B.Cu', thicknessMm: 0.035 },
+            ],
+        },
+    },
+    diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
+});
+assert.equal(invalidStackupApplication.copperLayerCount, undefined);
+assert.equal(invalidStackupApplication.diagnostics[0].code, 'EASYEDA_STACKUP_COPPER_LAYER_COUNT_UNSUPPORTED');
+assert.equal(invalidStackupApplication.diagnostics[0].severity, 'error');
+
 const values = {
     clearanceMm: 0.22, edgeClearanceMm: 0.5,
     minTrackWidthMm: 0.2, preferredTrackWidthMm: 0.3,

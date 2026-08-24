@@ -20,6 +20,9 @@ Existing copper is an obstacle and is preserved by default. To replace old
 routing, declare exactly what may be removed with `clearRouting(...)` in the
 same DSL. Do not use a separate clear tool.
 
-EasyEDA currently applies through vias and copper zones without holes. Physical
-stackup persistence is not available, so `applyStackup()` and a routing program
-that requests a changed physical stackup fail before editor mutation.
+EasyEDA currently applies through vias and copper zones without holes. When the
+DSL requests `applyStackup()`, the routing transaction applies the effective
+copper layer count (an even value from 2 to 32) before validating routed layers.
+Physical thickness and material properties are not changed yet; the operation
+returns `EASYEDA_STACKUP_LAYER_COUNT_ONLY` as a warning when those properties
+remain managed by the open board.

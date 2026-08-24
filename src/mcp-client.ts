@@ -204,6 +204,14 @@ function routingNumber(value: unknown, path: string, positive = false) {
     return value;
 }
 
+function routingCopperLayerCount(value: unknown) {
+    const count = routingNumber(value, 'copperLayerCount', true);
+    if (!Number.isInteger(count) || count < 2 || count > 32 || count % 2 !== 0) {
+        throw new Error('Invalid routing application copperLayerCount. Expected an even number from 2 to 32.');
+    }
+    return count;
+}
+
 function routingString(value: unknown, path: string) {
     if (typeof value !== 'string' || !value.trim()) {
         throw new Error(`Invalid routing application string: ${path}`);
@@ -292,7 +300,16 @@ function readRoutingApplication(value: unknown): RoutingCopperApplication {
         if (!nets || (Array.isArray(nets) && !nets.length)) throw new Error('Invalid clearRouting nets.');
         clearRouting = { nets, items };
     }
-    return { ...(clearRouting ? { clearRouting } : {}), tracks, vias, zones };
+    const copperLayerCount = value.copperLayerCount === undefined
+        ? undefined
+        : routingCopperLayerCount(value.copperLayerCount);
+    return {
+        ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
+        ...(clearRouting ? { clearRouting } : {}),
+        tracks,
+        vias,
+        zones,
+    };
 }
 
 function formatPath(path: Array<string | number>) {
@@ -1044,15 +1061,16 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                     'DRC rule application',
                     () => applyPcbDrcRules(bundle),
                 );
-                const hasCopperMutation = Boolean(
-                    application.clearRouting
+                const hasBoardMutation = Boolean(
+                    application.copperLayerCount !== undefined
+                    || application.clearRouting
                     || application.tracks.length
                     || application.vias.length
                     || application.zones.length,
                 );
-                const copper = hasCopperMutation
+                const copper = hasBoardMutation
                     ? await routingTransactionStep(
-                        'copper application',
+                        'board application',
                         () => applyRoutingCopper(application),
                     )
                     : undefined;
