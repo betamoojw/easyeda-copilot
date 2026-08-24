@@ -16,7 +16,6 @@ The local files in this directory are the documentation source for MCP work. Do 
 - `pcb-layout/instructions.md`: PCB placement workflow, heuristics, anti-patterns, and examples.
 - `pcb-layout/mcp-workflow.md`: MCP-specific flow for placement, async operation handling, assembly, preview, and DRC.
 - `pcb-layout/examples/`: full reference layout files. Use them as patterns after reading `dsl.ts`; if an example conflicts with `dsl.ts`, `dsl.ts` wins.
-- `pcb-drc/rules.md`: PCB DRC export/edit/apply workflow, including differential pair handling.
 - `pcb-routing/instructions.md`: router DSL workflow, operation lifecycle, copper preservation, and EasyEDA adapter limits.
 
 ## PCB Contract

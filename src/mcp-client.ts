@@ -331,15 +331,6 @@ async function getPcbStackLayers() {
     };
 }
 
-function readCopperLayerCount(value: unknown): 2 | 4 | 6 | 8 | 10 | 12 | 14 | 16 | 18 | 20 | 22 | 24 | 26 | 28 | 30 | 32 {
-    const allowed = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32] as const;
-    if (typeof value === 'number' && allowed.includes(value as typeof allowed[number])) {
-        return value as typeof allowed[number];
-    }
-
-    throw new Error('Invalid copper layer count. Expected an even number from 2 to 32.');
-}
-
 function isLayerMapName(name: string) {
     return name === 'data' || name === 'tables';
 }
@@ -728,13 +719,11 @@ async function exportPcbDrcRules(): Promise<PcbDrcBundle> {
     };
 }
 
-async function applyPcbDrcRules(bundle: PcbDrcBundle, saveCheckpoint = true) {
+async function applyPcbDrcRules(bundle: PcbDrcBundle) {
     const { regularNetRules, differentialPairs } = splitDifferentialPairsFromNetRules(bundle.netRules);
     const currentRuleConfiguration = await eda.pcb_Drc.getCurrentRuleConfiguration();
     if (!currentRuleConfiguration) throw new Error('Failed to read current PCB DRC rule configuration.');
     validateDrcRuleConfiguration(bundle.ruleConfiguration, currentRuleConfiguration.config);
-
-    if (saveCheckpoint) await checkpointer.save(false);
 
     const differentialPairResult = await reconcileDifferentialPairs(differentialPairs);
     const ruleConfiguration = await eda.pcb_Drc.overwriteCurrentRuleConfiguration(bundle.ruleConfiguration);
@@ -1028,20 +1017,6 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             return;
         }
 
-        if (message.event === 'set-pcb-copper-layer-count') {
-            const count = readCopperLayerCount(body.count);
-            await checkpointer.save(false);
-            const success = await eda.pcb_Layer.setTheNumberOfCopperLayers(count);
-            if (!success) throw new Error(`Failed to set PCB copper layer count: ${count}`);
-
-            reply(true, {
-                success,
-                count,
-                stack: await getPcbStackLayers(),
-            });
-            return;
-        }
-
         if (message.event === 'export-routing-input') {
             const file = await eda.pcb_ManufactureData.getAutoRouteJsonFile('Copilot_Routing_Input');
             if (!file) throw new Error('EasyEDA returned empty autoroute JSON file');
@@ -1067,7 +1042,7 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             try {
                 const rules = bundle === undefined ? undefined : await routingTransactionStep(
                     'DRC rule application',
-                    () => applyPcbDrcRules(bundle, false),
+                    () => applyPcbDrcRules(bundle),
                 );
                 const hasCopperMutation = Boolean(
                     application.clearRouting
@@ -1153,18 +1128,6 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                 tabId,
                 settleMs,
             });
-            return;
-        }
-
-        if (message.event === 'export-pcb-drc-rules') {
-            reply(true, await exportPcbDrcRules());
-            return;
-        }
-
-        if (message.event === 'apply-pcb-drc-rules') {
-            const bundle = body.bundle;
-            assertDrcBundle(bundle);
-            reply(true, await applyPcbDrcRules(bundle));
             return;
         }
 
