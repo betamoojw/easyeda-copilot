@@ -1,4 +1,4 @@
-import type { RoutingRules, RoutingRuleValues } from '@easyeda-copilot/router';
+import type { RoutingRules, RoutingRuleValues } from 'eda-copilot-router';
 import type {
     PcbDrcBundle,
     PcbDrcDifferentialPairRule,
@@ -129,13 +129,6 @@ function assignRulePresets(
     };
     rewriteContent(spacing);
     netRule['Safe Spacing'] = spacingName;
-
-    if (values.maxLengthMm !== undefined) {
-        const lengthName = `${prefix}_length`;
-        const length = createPreset(configuration, 'Physics', 'Net Length Range', lengthName);
-        replaceNamedValues(length, { netLengthMax: values.maxLengthMm });
-        netRule['Net Length Range'] = lengthName;
-    }
 
     if (values.differential) {
         const differentialName = `${prefix}_diff`;

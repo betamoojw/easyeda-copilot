@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
 import * as z from 'zod/v4';
 import { Bridge } from "../../bridge";
 import { textResult } from "../../utils/tool-result";
-import { AsyncOperationResponse, asyncProgressText, cancelAsyncTask, getAsyncTaskStatus, postJson, startAsyncTask, waitForAsyncTask } from "../../utils/server";
+import { asyncProgressText, cancelAsyncTask, postJson, startAsyncTask, waitForAsyncTask } from "../../utils/server";
 import { BoardAssemble } from "@copilot/shared/types/pcb/board-assemble";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import sharp from 'sharp';
 import { SKILL_DOC_PATH } from "../../utils/dirs";
+import { operationManager, type OperationContext } from '../../operations/manager';
+import type { ExplainCircuit } from '@copilot/shared/types/circuit';
 
 type MakePcbLayoutResponse = {
     content?: string;
@@ -65,14 +67,48 @@ type SavedPlacementDebugArtifacts = {
 };
 
 const PCB_LAYOUT_TASK_PATH = '/v1/mcp-tools/make-pcb-layout';
-const DEFAULT_PCB_LAYOUT_WAIT_MS = 60_000;
+const DEFAULT_PCB_LAYOUT_WAIT_MS = 30_000;
+const PCB_DOCUMENT_RESOURCE = 'current-pcb-document';
 
 const storedPcbLayouts = new Map<string, StoredPcbLayout>();
 
-let pcbLayoutOperationLock: {
-    operationId?: string;
-    startedAt: number;
-} | undefined;
+const ExistingPlacementSchema = z.object({
+    board: z.object({
+        polygon: z.array(z.object({
+            x: z.number(),
+            y: z.number(),
+        }).strict()).min(3),
+    }).strict(),
+    components: z.array(z.object({
+        designator: z.string().min(1),
+        x: z.number(),
+        y: z.number(),
+        rotate: z.number(),
+        layer: z.enum(['top', 'bottom']),
+    }).strict()),
+}).strict();
+
+type ExistingPlacement = z.infer<typeof ExistingPlacementSchema>;
+
+function placementForCircuit(value: unknown, circuit: ExplainCircuit): ExistingPlacement | undefined {
+    if (value === undefined || value === null) return undefined;
+    const placement = ExistingPlacementSchema.parse(value);
+    const circuitDesignators = new Map(circuit.components.map(component => [
+        component.designator.trim().toUpperCase(),
+        component.designator,
+    ]));
+    const seen = new Set<string>();
+    const components = placement.components.flatMap(component => {
+        const key = component.designator.trim().toUpperCase();
+        const designator = circuitDesignators.get(key);
+        if (!designator) return [];
+        if (seen.has(key)) throw new Error(`Ambiguous EasyEDA PCB designator: ${designator}`);
+        seen.add(key);
+        return [{ ...component, designator }];
+    });
+
+    return { board: placement.board, components };
+}
 
 
 function previewImageExtension(mimeType: string | undefined) {
@@ -172,73 +208,6 @@ async function storeMakePcbLayoutResult(result: MakePcbLayoutResponse) {
     };
 }
 
-async function formatPcbLayoutOperationResult(operationId: string, operation: AsyncOperationResponse<MakePcbLayoutResponse>) {
-    if (operation.status === 'completed') {
-        if (!operation.result) {
-            return textResult({
-                status: 'error',
-                operationId,
-                error: 'PCB layout operation completed without result.',
-            });
-        }
-
-        const stored = await storeMakePcbLayoutResult(operation.result);
-
-        const report = {
-            operationId,
-            status: 'completed',
-            ...stored,
-            debugArtifactsDir: undefined,
-            debugArtifactsIndexPath: undefined
-        };
-
-        const lines = [
-            operation.result.content ?? operation.result.error ?? 'PCB layout finished.',
-            `Run report:\n${JSON.stringify(report)}`,
-        ];
-
-        return textResult(lines.join('\n\n'));
-    }
-
-    if (operation.status === 'failed' || operation.status === 'cancelled') {
-        return textResult({
-            status: operation.status,
-            operationId,
-            error: operation.error ?? `PCB layout operation ${operation.status}.`,
-        });
-    }
-
-    return textResult({
-        status: 'pending',
-        operationId,
-        progress: asyncProgressText(operation.intermediateResult),
-        progressDetails: operation.intermediateResult,
-        message: 'PCB layout is still running. Call wait_pcb_layout with this operationId.',
-        nextTool: 'wait_pcb_layout',
-    });
-}
-
-async function assertNoPendingPcbLayoutOperation() {
-    if (!pcbLayoutOperationLock) return;
-
-    if (!pcbLayoutOperationLock.operationId) {
-        throw new Error('make_pcb_layout is already starting. Wait for it to return an operationId before starting another layout.');
-    }
-
-    const operation = await getAsyncTaskStatus<MakePcbLayoutResponse>(PCB_LAYOUT_TASK_PATH, pcbLayoutOperationLock.operationId);
-    if (operation.status === 'pending') {
-        throw new Error(`make_pcb_layout is already running. Wait for it with wait_pcb_layout or cancel it first. operationId: ${pcbLayoutOperationLock.operationId}`);
-    }
-
-    pcbLayoutOperationLock = undefined;
-}
-
-function releasePcbLayoutLockIfFinished(operationId: string, operation: AsyncOperationResponse<unknown>) {
-    if (pcbLayoutOperationLock?.operationId !== operationId) return;
-    if (operation.status === 'pending') return;
-    pcbLayoutOperationLock = undefined;
-}
-
 function safeFileSegment(value: string) {
     return value.replace(/[^a-z0-9_.-]+/gi, '_').replace(/^_+|_+$/g, '') || 'unnamed';
 }
@@ -296,6 +265,71 @@ async function writePlacementDebugArtifactFiles(artifacts: PlacementDebugArtifac
     };
 }
 
+async function runPcbLayout(
+    bridge: Bridge,
+    file: string,
+    context: OperationContext,
+) {
+    context.setStage('preparing');
+    // Capture placement before schematic extraction changes the active EasyEDA document.
+    const [code, rawExistingPlacement] = await Promise.all([
+        readFile(file, 'utf8'),
+        bridge.requestEasyEda('get-pcb-existing-placement'),
+    ]);
+    const circuit = await bridge.requestEasyEda(
+        'get-multi-page-schematic',
+        { extractFootprintUuid: true },
+    ) as ExplainCircuit;
+    const existingPlacement = placementForCircuit(rawExistingPlacement, circuit);
+    context.signal.throwIfAborted();
+
+    context.setStage('starting_remote');
+    const remoteOperationId = await startAsyncTask(PCB_LAYOUT_TASK_PATH, {
+        code,
+        circuit,
+        ...(existingPlacement ? { existingPlacement } : {}),
+    });
+    context.onCancel(() => cancelAsyncTask(PCB_LAYOUT_TASK_PATH, remoteOperationId));
+    context.signal.throwIfAborted();
+
+    while (true) {
+        context.setStage('placing');
+        const operation = await waitForAsyncTask<MakePcbLayoutResponse>(
+            PCB_LAYOUT_TASK_PATH,
+            remoteOperationId,
+            { pollIntervalMs: 2000, waitMs: 10_000 },
+        );
+        context.setProgress({
+            message: asyncProgressText(operation.intermediateResult),
+            details: operation.intermediateResult,
+        });
+        context.signal.throwIfAborted();
+        if (operation.status === 'pending') continue;
+        if (operation.status === 'failed' || operation.status === 'cancelled') {
+            throw new Error(operation.error ?? `PCB layout operation ${operation.status}.`);
+        }
+        if (!operation.result) throw new Error('PCB layout operation completed without result.');
+
+        context.setStage('storing_result');
+        const stored = await storeMakePcbLayoutResult(operation.result);
+        return {
+            status: 'completed' as const,
+            operation_id: context.id,
+            ...stored,
+            content: operation.result.content ?? operation.result.error ?? 'PCB layout finished.',
+        };
+    }
+}
+
+async function makePcbLayout(bridge: Bridge, file: string, waitMs: number) {
+    const operationId = operationManager.start(
+        'pcb-layout',
+        context => runPcbLayout(bridge, file, context),
+        { resource: PCB_DOCUMENT_RESOURCE },
+    );
+    return operationManager.wait(operationId, waitMs);
+}
+
 export function registerPcbLayoutTools(server: McpServer, bridge: Bridge) {
 
     server.registerTool(
@@ -326,88 +360,18 @@ export function registerPcbLayoutTools(server: McpServer, bridge: Bridge) {
         'make_pcb_layout',
         {
             title: 'Make PCB Layout',
-            description: `Create PCB component placement from the current EasyEDA schematic using JavaScript PCB layout DSL code. Starts a long-running server operation, waits up to 60 seconds, then returns either the finished layoutId/preview or an operationId for wait_pcb_layout. Server-side routing is disabled: route the assembled PCB later in EasyEDA/client tools. This tool does not assemble the board. For PCB layout docs, read the local docs folder: ${SKILL_DOC_PATH}`,
+            description: `Create PCB component placement using JavaScript PCB layout DSL code. Open the target EasyEDA PCB first so its outline and component positions are supplied as existingPlacement. Long work returns an operation_id for wait_operation. Server-side routing is disabled: route the assembled PCB later in EasyEDA/client tools. This tool does not assemble the board. For PCB layout docs, read the local docs folder: ${SKILL_DOC_PATH}`,
             inputSchema: z.object({
                 file: z.string().min(1).describe('Path to a JavaScript PCB layout DSL code file.'),
-                wait_ms: z.number().min(30_000).max(180000).default(DEFAULT_PCB_LAYOUT_WAIT_MS).describe('How long this call may wait for completion. Default: 60000ms.'),
-            }).refine(data => Boolean(data.file), {
-                message: 'Fill one: code, file.',
+                wait_ms: z.number().int().min(1_000).max(55_000).default(DEFAULT_PCB_LAYOUT_WAIT_MS)
+                    .describe('Initial synchronous wait before returning a pcb-layout operation_id.'),
             }),
         },
-        async (input) => {
-            await assertNoPendingPcbLayoutOperation();
-            pcbLayoutOperationLock = { startedAt: Date.now() };
-
-            let operationId: string | undefined;
-            let operation: AsyncOperationResponse<MakePcbLayoutResponse>;
-
-            try {
-                const code = await readFile(input.file, 'utf8');
-                const circuit = await bridge.requestEasyEda('get-multi-page-schematic', {
-                    extractFootprintUuid: true
-                });
-
-                operationId = await startAsyncTask(PCB_LAYOUT_TASK_PATH, {
-                    code,
-                    circuit,
-                });
-                pcbLayoutOperationLock.operationId = operationId;
-
-                operation = await waitForAsyncTask<MakePcbLayoutResponse>(PCB_LAYOUT_TASK_PATH, operationId, {
-                    pollIntervalMs: 2000,
-                    waitMs: input.wait_ms ?? DEFAULT_PCB_LAYOUT_WAIT_MS,
-                });
-                releasePcbLayoutLockIfFinished(operationId, operation);
-            } catch (error) {
-                if (!operationId) pcbLayoutOperationLock = undefined;
-                throw error;
-            }
-
-            return await formatPcbLayoutOperationResult(operationId, operation);
-        },
-    );
-
-    server.registerTool(
-        'wait_pcb_layout',
-        {
-            title: 'Wait PCB Layout',
-            description: 'Wait for a previously started make_pcb_layout operation. Use operationId returned by make_pcb_layout when it says the layout is still running.',
-            inputSchema: z.object({
-                operationId: z.string().min(1).describe('operationId returned by make_pcb_layout.'),
-                wait_ms: z.number().min(30_000).max(180000).default(DEFAULT_PCB_LAYOUT_WAIT_MS).describe('How long this call may wait for completion. Default: 60000ms.'),
-            }),
-        },
-        async ({ operationId, wait_ms }) => {
-            const operation = await waitForAsyncTask<MakePcbLayoutResponse>(PCB_LAYOUT_TASK_PATH, operationId, {
-                pollIntervalMs: 2000,
-                waitMs: wait_ms ?? DEFAULT_PCB_LAYOUT_WAIT_MS,
-            });
-            releasePcbLayoutLockIfFinished(operationId, operation);
-
-            return await formatPcbLayoutOperationResult(operationId, operation);
-        },
-    );
-
-    server.registerTool(
-        'cancel_pcb_layout',
-        {
-            title: 'Cancel PCB Layout',
-            description: 'Cancel a previously started make_pcb_layout operation by operationId.',
-            inputSchema: z.object({
-                operationId: z.string().min(1).describe('operationId returned by make_pcb_layout.'),
-            }),
-        },
-        async ({ operationId }) => {
-            const result = await cancelAsyncTask(PCB_LAYOUT_TASK_PATH, operationId);
-            await getAsyncTaskStatus<MakePcbLayoutResponse>(PCB_LAYOUT_TASK_PATH, operationId)
-                .then(operation => releasePcbLayoutLockIfFinished(operationId, operation))
-                .catch(() => undefined);
-            return textResult({
-                status: 'cancel_requested',
-                operationId,
-                result,
-            });
-        },
+        async ({ file, wait_ms }) => textResult(await makePcbLayout(
+            bridge,
+            file,
+            wait_ms ?? DEFAULT_PCB_LAYOUT_WAIT_MS,
+        )),
     );
 
     server.registerTool(

@@ -2,14 +2,11 @@ import { assembleCircuit } from './eda/assemble';
 import {
     applyRoutingCopper,
     assembleBoard,
-    clearCurrentPcbBoard,
-    pourDefaultGroundAndSutureVias,
-    type GroundSutureOptions,
     type RoutingCopperApplication,
 } from './eda/pcb-assemble';
 import { checkpointer } from './eda/checkpointer';
 import { checkPcbDrc } from './eda/drc';
-import { getPcb, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
+import { getPcb, getPcbExistingPlacement, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
 import { getSchematic } from './eda/schematic';
 import '@copilot/shared/types/eda';
 import { ExplainCircuit } from '@copilot/shared/types/circuit';
@@ -200,6 +197,121 @@ function assertDrcBundle(value: unknown): asserts value is PcbDrcBundle {
     }
 }
 
+function routingNumber(value: unknown, path: string, positive = false) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || (positive && value <= 0)) {
+        throw new Error(`Invalid routing application number: ${path}`);
+    }
+    return value;
+}
+
+function routingCopperLayerCount(value: unknown) {
+    const count = routingNumber(value, 'copperLayerCount', true);
+    if (!Number.isInteger(count) || count < 2 || count > 32 || count % 2 !== 0) {
+        throw new Error('Invalid routing application copperLayerCount. Expected an even number from 2 to 32.');
+    }
+    return count;
+}
+
+function routingString(value: unknown, path: string) {
+    if (typeof value !== 'string' || !value.trim()) {
+        throw new Error(`Invalid routing application string: ${path}`);
+    }
+    return value.trim();
+}
+
+function routingPoint(value: unknown, path: string) {
+    if (!Array.isArray(value) || value.length < 2) {
+        throw new Error(`Invalid routing application point: ${path}`);
+    }
+    return {
+        x: routingNumber(value[0], `${path}[0]`),
+        y: routingNumber(value[1], `${path}[1]`),
+    };
+}
+
+function readRoutingApplication(value: unknown): RoutingCopperApplication {
+    if (!isRecord(value)) throw new Error('Invalid routing application payload.');
+    const tracks = (Array.isArray(value.tracks) ? value.tracks : []).map((candidate, index) => {
+        if (!isRecord(candidate)) throw new Error(`Invalid routing track: ${index}`);
+        const points = (Array.isArray(candidate.points) ? candidate.points : [])
+            .map((point, pointIndex) => routingPoint(point, `tracks[${index}].points[${pointIndex}]`));
+        if (points.length < 2) throw new Error(`Routing track has fewer than two points: ${index}`);
+        return {
+            ...(typeof candidate.id === 'string' ? { id: candidate.id } : {}),
+            net: routingString(candidate.net, `tracks[${index}].net`),
+            layer: routingNumber(candidate.layer, `tracks[${index}].layer`),
+            widthMm: routingNumber(candidate.widthMm, `tracks[${index}].widthMm`, true),
+            points,
+        };
+    });
+    const vias = (Array.isArray(value.vias) ? value.vias : []).map((candidate, index) => {
+        if (!isRecord(candidate)) throw new Error(`Invalid routing via: ${index}`);
+        const at = routingPoint(candidate.location, `vias[${index}].location`);
+        return {
+            ...(typeof candidate.id === 'string' ? { id: candidate.id } : {}),
+            net: routingString(candidate.net, `vias[${index}].net`),
+            x: at.x,
+            y: at.y,
+            diameterMm: routingNumber(candidate.diameterMm, `vias[${index}].diameterMm`, true),
+            drillMm: routingNumber(candidate.drillMm, `vias[${index}].drillMm`, true),
+        };
+    });
+    const zones = (Array.isArray(value.zones) ? value.zones : []).map((candidate, index) => {
+        if (!isRecord(candidate)) throw new Error(`Invalid routing zone: ${index}`);
+        if (Array.isArray(candidate.holes) && candidate.holes.length) {
+            throw new Error(`Routing zone holes are not supported by EasyEDA apply: ${index}`);
+        }
+        const points = (Array.isArray(candidate.outline) ? candidate.outline : [])
+            .map((point, pointIndex) => routingPoint(point, `zones[${index}].outline[${pointIndex}]`));
+        if (points.length < 3) throw new Error(`Routing zone has fewer than three points: ${index}`);
+        const layers = (Array.isArray(candidate.layers) ? candidate.layers : [])
+            .map((layer, layerIndex) => routingNumber(layer, `zones[${index}].layers[${layerIndex}]`));
+        if (!layers.length) throw new Error(`Routing zone has no layers: ${index}`);
+        return {
+            ...(typeof candidate.id === 'string' ? { id: candidate.id } : {}),
+            net: routingString(candidate.net, `zones[${index}].net`),
+            layers,
+            points,
+            ...(typeof candidate.priority === 'number'
+                ? { priority: routingNumber(candidate.priority, `zones[${index}].priority`) }
+                : {}),
+            ...(typeof candidate.minThicknessMm === 'number'
+                ? { minThicknessMm: routingNumber(candidate.minThicknessMm, `zones[${index}].minThicknessMm`, true) }
+                : {}),
+        };
+    });
+
+    let clearRouting: RoutingCopperApplication['clearRouting'];
+    if (value.clearRouting !== undefined) {
+        if (!isRecord(value.clearRouting)) throw new Error('Invalid clearRouting payload.');
+        const rawItems = Array.isArray(value.clearRouting.items) ? value.clearRouting.items : [];
+        const items = rawItems
+            .filter((item): item is 'tracks' | 'vias' | 'zones' => (
+                item === 'tracks' || item === 'vias' || item === 'zones'
+            ));
+        if (!items.length || items.length !== rawItems.length) {
+            throw new Error('Invalid clearRouting items.');
+        }
+        const nets = value.clearRouting.nets === 'all'
+            ? 'all' as const
+            : Array.isArray(value.clearRouting.nets)
+                ? value.clearRouting.nets.map((net, index) => routingString(net, `clearRouting.nets[${index}]`))
+                : undefined;
+        if (!nets || (Array.isArray(nets) && !nets.length)) throw new Error('Invalid clearRouting nets.');
+        clearRouting = { nets, items };
+    }
+    const copperLayerCount = value.copperLayerCount === undefined
+        ? undefined
+        : routingCopperLayerCount(value.copperLayerCount);
+    return {
+        ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
+        ...(clearRouting ? { clearRouting } : {}),
+        tracks,
+        vias,
+        zones,
+    };
+}
+
 function formatPath(path: Array<string | number>) {
     return path.map(part => typeof part === 'number'
         ? `[${part}]`
@@ -207,44 +319,6 @@ function formatPath(path: Array<string | number>) {
             ? `.${part}`
             : `[${JSON.stringify(part)}]`
     ).join('').replace(/^\./, '');
-}
-
-function readBoardPolygon(value: unknown): Parameters<typeof pourDefaultGroundAndSutureVias>[0] | undefined {
-    if (!Array.isArray(value)) return undefined;
-
-    const polygon = value
-        .filter((point): point is { x: number; y: number } =>
-            isRecord(point) &&
-            typeof point.x === 'number' &&
-            typeof point.y === 'number' &&
-            Number.isFinite(point.x) &&
-            Number.isFinite(point.y),
-        )
-        .map(point => ({ x: point.x, y: point.y }));
-
-    return polygon.length >= 3 ? { polygon } : undefined;
-}
-
-function readGroundSutureOptions(value: unknown): GroundSutureOptions {
-    if (!isRecord(value)) return {};
-
-    return {
-        gridMm: typeof value.gridMm === 'number' ? value.gridMm : undefined,
-        diameterMm: typeof value.diameterMm === 'number' ? value.diameterMm : undefined,
-        drillMm: typeof value.drillMm === 'number' ? value.drillMm : undefined,
-        edgeMarginMm: typeof value.edgeMarginMm === 'number' ? value.edgeMarginMm : undefined,
-        maxCount: typeof value.maxCount === 'number' ? value.maxCount : undefined,
-    };
-}
-
-function readStringList(value: unknown) {
-    if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
-    if (!Array.isArray(value)) return [];
-
-    return value
-        .filter((item): item is string => typeof item === 'string')
-        .map(item => item.trim())
-        .filter(Boolean);
 }
 
 function rawLayerName(raw: number | string) {
@@ -272,15 +346,6 @@ async function getPcbStackLayers() {
         copperLayerCount,
         layers,
     };
-}
-
-function readCopperLayerCount(value: unknown): 2 | 4 | 6 | 8 | 10 | 12 | 14 | 16 | 18 | 20 | 22 | 24 | 26 | 28 | 30 | 32 {
-    const allowed = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32] as const;
-    if (typeof value === 'number' && allowed.includes(value as typeof allowed[number])) {
-        return value as typeof allowed[number];
-    }
-
-    throw new Error('Invalid copper layer count. Expected an even number from 2 to 32.');
 }
 
 function isLayerMapName(name: string) {
@@ -677,8 +742,6 @@ async function applyPcbDrcRules(bundle: PcbDrcBundle) {
     if (!currentRuleConfiguration) throw new Error('Failed to read current PCB DRC rule configuration.');
     validateDrcRuleConfiguration(bundle.ruleConfiguration, currentRuleConfiguration.config);
 
-    await checkpointer.save(false);
-
     const differentialPairResult = await reconcileDifferentialPairs(differentialPairs);
     const ruleConfiguration = await eda.pcb_Drc.overwriteCurrentRuleConfiguration(bundle.ruleConfiguration);
     if (!ruleConfiguration) throw new Error('Failed to overwrite current PCB DRC rule configuration.');
@@ -693,6 +756,16 @@ async function applyPcbDrcRules(bundle: PcbDrcBundle) {
         regularNetRules: regularNetRules.length,
         differentialPairs: differentialPairResult,
     };
+}
+
+async function routingTransactionStep<T>(stage: string, action: () => Promise<T>) {
+    try {
+        return await action();
+    } catch (error) {
+        throw new Error(
+            `Routing transaction ${stage} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
 }
 
 async function saveCurrentDocument(document: IDMT_EditorDocumentItem) {
@@ -928,20 +1001,28 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
         }
 
         if (message.event === 'get-multi-page-schematic') {
-            await openSchematic();
-            const extractFootprintUuid = !!body.extractFootprintUuid;
-            const allPages = await eda.dmt_Schematic.getCurrentSchematicAllSchematicPagesInfo().catch(e => undefined);
-            if (!allPages || !allPages.length) throw new Error('Not open any sch or is empty sch');
+            const originalDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => undefined);
             const fullSch: ExplainCircuit = { components: [] };
+            try {
+                await openSchematic();
+                const extractFootprintUuid = !!body.extractFootprintUuid;
+                const allPages = await eda.dmt_Schematic.getCurrentSchematicAllSchematicPagesInfo().catch(() => undefined);
+                if (!allPages || !allPages.length) throw new Error('Not open any sch or is empty sch');
 
-            for (const page of allPages) {
-                await eda.dmt_EditorControl.openDocument(page.uuid);
-                await new Promise(resolve => setTimeout(resolve, 400));
-                const primitiveIds = await eda.sch_PrimitiveComponent.getAllPrimitiveId().catch(() => []);
-                const schematic = await getSchematic([...primitiveIds], { extractFootprintUuid, disableExtractPos: true });
-                fullSch.components.push(...schematic.components);
+                for (const page of allPages) {
+                    await eda.dmt_EditorControl.openDocument(page.uuid);
+                    await delay(400);
+                    const primitiveIds = await eda.sch_PrimitiveComponent.getAllPrimitiveId().catch(() => []);
+                    const schematic = await getSchematic([...primitiveIds], { extractFootprintUuid, disableExtractPos: true });
+                    fullSch.components.push(...schematic.components);
+                }
+            } finally {
+                const currentDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => undefined);
+                if (originalDocument?.uuid && currentDocument?.uuid !== originalDocument.uuid) {
+                    await eda.dmt_EditorControl.openDocument(originalDocument.uuid);
+                    await delay(400);
+                }
             }
-
             reply(true, fullSch);
             return;
         }
@@ -956,35 +1037,13 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             return;
         }
 
+        if (message.event === 'get-pcb-existing-placement') {
+            reply(true, await getPcbExistingPlacement());
+            return;
+        }
+
         if (message.event === 'get-pcb-stack-layers') {
             reply(true, await getPcbStackLayers());
-            return;
-        }
-
-        if (message.event === 'set-pcb-copper-layer-count') {
-            const count = readCopperLayerCount(body.count);
-            await checkpointer.save(false);
-            const success = await eda.pcb_Layer.setTheNumberOfCopperLayers(count);
-            if (!success) throw new Error(`Failed to set PCB copper layer count: ${count}`);
-
-            reply(true, {
-                success,
-                count,
-                stack: await getPcbStackLayers(),
-            });
-            return;
-        }
-
-        if (message.event === 'export-pcb-autoroute-json') {
-            const file = await eda.pcb_ManufactureData.getAutoRouteJsonFile('Copilot_AutoRoute_Json');
-            if (!file) throw new Error('EasyEDA returned empty autoroute JSON file');
-
-            reply(true, {
-                name: file.name,
-                size: file.size,
-                type: file.type,
-                text: await file.text(),
-            });
             return;
         }
 
@@ -1003,116 +1062,51 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
 
         if (message.event === 'apply-routing-result') {
             const bundle = body.bundle;
-            const copper = body.copper;
-            if (bundle === undefined && copper === undefined) throw new Error('Routing result has neither DRC nor copper changes.');
+            const application = readRoutingApplication(body.application);
             if (bundle !== undefined) assertDrcBundle(bundle);
-            if (copper !== undefined && !isRecord(copper)) throw new Error('Invalid routing copper payload.');
 
-            // One outer checkpoint makes DRC + complete copper replacement a
-            // single host transaction. The helper's extra checkpoint remains
-            // a useful recovery point for EasyEDA itself.
+            // DRC, selective copper deletion, new geometry, refill, and native
+            // verification share one recovery boundary.
             const checkpointId = await checkpointer.save(false);
+            if (!checkpointId) throw new Error('Failed to create routing transaction checkpoint.');
             try {
-                const rules = bundle === undefined ? undefined : await applyPcbDrcRules(bundle);
-                let copperResult: unknown;
-                if (isRecord(copper)) {
-                    const layer = (name: unknown): 'top' | 'bottom' => {
-                        if (name === 'TOP') return 'top';
-                        if (name === 'BOTTOM') return 'bottom';
-                        throw new Error(`EasyEDA live application currently supports only TOP/BOTTOM copper, received ${String(name)}.`);
-                    };
-                    const tracks = Array.isArray(copper.tracks) ? copper.tracks.map((candidate) => {
-                        if (!isRecord(candidate) || typeof candidate.net !== 'string'
-                            || typeof candidate.widthMm !== 'number' || !Array.isArray(candidate.points)) {
-                            throw new Error('Invalid routed track payload.');
-                        }
-                        return {
-                            net: candidate.net,
-                            layer: layer(candidate.layer),
-                            width: candidate.widthMm,
-                            points: candidate.points.map(point => {
-                                if (!isRecord(point) || typeof point.x !== 'number' || typeof point.y !== 'number') {
-                                    throw new Error('Invalid routed track point.');
-                                }
-                                return { x: point.x, y: -point.y };
-                            }),
-                        };
-                    }) : [];
-                    const vias = Array.isArray(copper.vias) ? copper.vias.map((candidate) => {
-                        if (!isRecord(candidate) || typeof candidate.net !== 'string' || !isRecord(candidate.at)
-                            || typeof candidate.at.x !== 'number' || typeof candidate.at.y !== 'number'
-                            || typeof candidate.diameterMm !== 'number' || typeof candidate.drillMm !== 'number') {
-                            throw new Error('Invalid routed via payload.');
-                        }
-                        return {
-                            net: candidate.net, x: candidate.at.x, y: -candidate.at.y,
-                            diameter: candidate.diameterMm, drill: candidate.drillMm,
-                        };
-                    }) : [];
-                    const zones = Array.isArray(copper.zones) ? copper.zones.flatMap((candidate) => {
-                        if (!isRecord(candidate) || typeof candidate.net !== 'string' || !isRecord(candidate.outline)
-                            || !Array.isArray(candidate.outline.outer) || !Array.isArray(candidate.layers)) {
-                            throw new Error('Invalid routed zone payload.');
-                        }
-                        if (Array.isArray(candidate.outline.holes) && candidate.outline.holes.length) {
-                            throw new Error(`EasyEDA live apply cannot preserve zone holes yet: ${candidate.net}.`);
-                        }
-                        return candidate.layers.map(name => ({
-                            net: candidate.net,
-                            layer: layer(name),
-                            points: candidate.outline.outer.map(point => {
-                                if (!isRecord(point) || typeof point.x !== 'number' || typeof point.y !== 'number') {
-                                    throw new Error('Invalid routed zone point.');
-                                }
-                                return { x: point.x, y: -point.y };
-                            }),
-                            ...(typeof candidate.priority === 'number' ? { priority: candidate.priority } : {}),
-                            ...(typeof candidate.minThicknessMm === 'number' ? { minThicknessMm: candidate.minThicknessMm } : {}),
-                        }));
-                    }) : [];
-                    copperResult = await applyRoutingCopper({ tracks, vias, zones } satisfies RoutingCopperApplication);
-                }
-                reply(true, { applied: true, rules, copper: copperResult });
+                const rules = bundle === undefined ? undefined : await routingTransactionStep(
+                    'DRC rule application',
+                    () => applyPcbDrcRules(bundle),
+                );
+                const hasBoardMutation = Boolean(
+                    application.copperLayerCount !== undefined
+                    || application.clearRouting
+                    || application.tracks.length
+                    || application.vias.length
+                    || application.zones.length,
+                );
+                const copper = hasBoardMutation
+                    ? await routingTransactionStep(
+                        'board application',
+                        () => applyRoutingCopper(application),
+                    )
+                    : undefined;
+                const drc = await routingTransactionStep(
+                    'native DRC verification',
+                    () => checkPcbDrc(100),
+                );
+                const violationCount = drc.reduce((categoryTotal, category) => (
+                    categoryTotal + category.list.reduce((groupTotal, group) => groupTotal + group.list.length, 0)
+                ), 0);
+                reply(true, {
+                    applied: true,
+                    rules,
+                    copper,
+                    nativeVerification: violationCount ? 'failed' : 'passed',
+                    violationCount,
+                    drc,
+                });
             } catch (error) {
                 const restored = await checkpointer.restore(checkpointId, true).catch(() => false);
                 const message = error instanceof Error ? error.message : String(error);
                 throw new Error(restored ? `${message}; routing transaction rolled back` : `${message}; routing rollback failed`);
             }
-            return;
-        }
-
-        if (message.event === 'import-pcb-autoroute-json') {
-            const text = typeof body.text === 'string' ? body.text : '';
-            if (!text) throw new Error('Missing routed autoroute JSON text');
-
-            const routeFile = new File([text], 'Copilot_AutoRoute_Result.json', {
-                type: 'application/json',
-            });
-
-            await checkpointer.save(false);
-            const imported = await eda.pcb_Document.importAutoRouteJsonFile(routeFile);
-            if (!imported) throw new Error('EasyEDA failed to import autoroute JSON');
-
-            const groundResult = await pourDefaultGroundAndSutureVias(readBoardPolygon(body.boardPolygon), {
-                pourGround: body.pourGround !== false,
-                sutureGround: body.sutureGround !== false,
-                suture: readGroundSutureOptions(body.suture),
-            });
-
-            reply(true, { imported, groundResult });
-            return;
-        }
-
-        if (message.event === 'clear-pcb-routing') {
-            await checkpointer.save(false);
-            const result = await clearCurrentPcbBoard({
-                ignoreToClearNet: readStringList(body.ignoreToClearNet),
-                clearOnlyNet: readStringList(body.clearOnlyNet),
-                preserveBoardOutline: true,
-            });
-            await eda.pcb_Document.startCalculatingRatline().catch(() => false);
-
-            reply(true, result);
             return;
         }
 
@@ -1165,18 +1159,6 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                 tabId,
                 settleMs,
             });
-            return;
-        }
-
-        if (message.event === 'export-pcb-drc-rules') {
-            reply(true, await exportPcbDrcRules());
-            return;
-        }
-
-        if (message.event === 'apply-pcb-drc-rules') {
-            const bundle = body.bundle;
-            assertDrcBundle(bundle);
-            reply(true, await applyPcbDrcRules(bundle));
             return;
         }
 

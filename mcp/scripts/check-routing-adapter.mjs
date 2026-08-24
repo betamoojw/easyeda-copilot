@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 const adapter = await import(pathToFileURL(resolve('dist/routing/easyeda-autoroute-adapter.js')).href);
 const drcAdapter = await import(pathToFileURL(resolve('dist/routing/easyeda-drc-adapter.js')).href);
+const router = await import('eda-copilot-router');
 
 const fixture = {
     boardOutline: { path: [[-5, -5], [5, -5], [5, 5], [-5, 5], [-5, -5]] },
@@ -21,8 +22,12 @@ const fixture = {
     ],
     components: {
         U1: {
-            name: 'U1', footprint: 'fp', layer: 1, location: [1, 2], rotation: 90,
-            nets: { p0: 'SIG', p1: 'SIG' }, pinName: { p0: '1', p1: '1' },
+            name: 'SHARED-MPN', footprint: 'fp', layer: 1, location: [1, 2], rotation: 90,
+            nets: { p0: 'SIG', p1: 'SIG' }, pinName: { p0: 'VIN', p1: 'VIN' },
+        },
+        J1: {
+            name: 'SHARED-MPN', footprint: 'tht', layer: 1, location: [-2, 0], rotation: 0,
+            nets: { p0: 'SIG_N' }, pinName: { p0: '1' },
         },
     },
     footprints: {
@@ -30,6 +35,14 @@ const fixture = {
             pads: {
                 p0: { number: '1', layers: [1], location: [1, 0], path: [[0.5, -0.5], [1.5, -0.5], [1.5, 0.5], [0.5, 0.5]] },
                 p1: { number: '1', layers: [1], location: [-1, 0], path: [[-1.5, -0.5], [-0.5, -0.5], [-0.5, 0.5], [-1.5, 0.5]] },
+            },
+        },
+        tht: {
+            pads: {
+                p0: {
+                    number: '1', layers: [1, 2], location: [0, 0], diameter: 2.5,
+                    path: [[1.25, 0], [-1.25, 0, -180], [1.25, 0, -180]],
+                },
             },
         },
     },
@@ -40,26 +53,87 @@ const fixture = {
 const imported = adapter.importEasyEdaAutorouteJson(fixture);
 assert.ok(imported.board, JSON.stringify(imported.diagnostics));
 assert.equal(imported.diagnostics.filter(item => item.severity === 'error').length, 0);
-assert.equal(imported.board.pads.length, 2, 'duplicate logical pad numbers are physical pads, not an error');
-assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x: 1, y: -1 }]);
-assert.equal(imported.board.copper.editable.tracks.length, 1);
-assert.equal(imported.board.copper.fixed.tracks.length, 0);
+assert.deepEqual(imported.board.layers.map(item => item.name), ['F.Cu', 'B.Cu']);
+assert.deepEqual(imported.board.components.map(item => item.designator), ['U1', 'J1']);
+assert.equal(imported.board.pads.length, 3, 'duplicate logical pad numbers are physical pads, not an error');
+assert.deepEqual(imported.board.pads.map(item => item.number), ['1', '1', '1']);
+assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x: 1, y: -1 }, { x: -2, y: 0 }]);
+assert.deepEqual(imported.board.pads[0].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
+assert.deepEqual(imported.board.pads[1].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
+assert.deepEqual(imported.board.pads[2].shape, { kind: 'circle', diameterMm: 2.5 });
+assert.equal(imported.board.copper.editable.tracks.length, 0);
+assert.equal(imported.board.copper.fixed.tracks.length, 1);
 assert.equal(imported.board.rules.nets[0].values.preferredTrackWidthMm, 0.25);
 assert.deepEqual(imported.board.rules.differentialPairs, [{ id: 'pair', positive: 'SIG', negative: 'SIG_N' }]);
+
+const rerouteImport = adapter.importEasyEdaAutorouteJson(fixture, {
+    clearRouting: { nets: ['SIG'], items: ['tracks'] },
+});
+assert.ok(rerouteImport.board, JSON.stringify(rerouteImport.diagnostics));
+assert.equal(rerouteImport.board.copper.editable.tracks.length, 1);
+assert.equal(rerouteImport.board.copper.fixed.tracks.length, 0);
+
+const copperOnly = await router.run({
+    board: rerouteImport.board,
+    dsl: `clearRouting({ nets: ["SIG"], items: ["tracks"] }); runCopper();`,
+});
+assert.equal(copperOnly.status, 'complete');
+assert.deepEqual(copperOnly.clearRouting, { nets: ['SIG'], items: ['tracks'] });
+assert.equal(copperOnly.copper.tracks.length, 0);
 
 const application = adapter.routingResultToEasyEdaApplication({
     status: 'complete', operation: 'route',
     rules: { effective: imported.board.rules, applyRequested: false, overriddenFields: [] },
     copper: {
-        tracks: [{ net: 'SIG', layer: 'TOP', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
-        vias: [{ net: 'SIG', at: { x: 2, y: -3 }, diameterMm: 0.6, drillMm: 0.3, fromLayer: 'TOP', toLayer: 'BOTTOM' }],
+        tracks: [{ net: 'SIG', layer: 'F.Cu', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
+        vias: [{ net: 'SIG', at: { x: 2, y: -3 }, diameterMm: 0.6, drillMm: 0.3, fromLayer: 'F.Cu', toLayer: 'B.Cu' }],
         zones: [],
     },
     diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
 });
-assert.deepEqual(application.autorouteResult.traces[0].path, [[1, 3], [2, 3]]);
-assert.deepEqual(application.autorouteResult.vias[0].location, [2, 3]);
+assert.deepEqual(application.tracks[0].points, [[1, 3], [2, 3]]);
+assert.deepEqual(application.vias[0].location, [2, 3]);
 assert.equal(application.diagnostics.length, 0);
+
+const stackupApplication = adapter.routingResultToEasyEdaApplication({
+    status: 'complete', operation: 'apply-stackup',
+    rules: { effective: imported.board.rules, applyRequested: false, overriddenFields: [] },
+    stackup: {
+        applyRequested: true,
+        effective: {
+            layers: [
+                { kind: 'copper', layer: 'F.Cu', thicknessMm: 0.035 },
+                { kind: 'dielectric', name: 'Core', thicknessMm: 1.5, relativePermittivity: 4.2 },
+                { kind: 'copper', layer: 'B.Cu', thicknessMm: 0.035 },
+            ],
+        },
+    },
+    diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
+});
+assert.equal(stackupApplication.copperLayerCount, 2);
+assert.equal(stackupApplication.diagnostics[0].code, 'EASYEDA_STACKUP_LAYER_COUNT_ONLY');
+assert.equal(stackupApplication.diagnostics[0].severity, 'warning');
+
+const invalidStackupApplication = adapter.routingResultToEasyEdaApplication({
+    status: 'complete', operation: 'apply-stackup',
+    rules: { effective: imported.board.rules, applyRequested: false, overriddenFields: [] },
+    stackup: {
+        applyRequested: true,
+        effective: {
+            layers: [
+                { kind: 'copper', layer: 'F.Cu', thicknessMm: 0.035 },
+                { kind: 'dielectric', name: 'Core 1', thicknessMm: 0.7 },
+                { kind: 'copper', layer: 'In1.Cu', thicknessMm: 0.035 },
+                { kind: 'dielectric', name: 'Core 2', thicknessMm: 0.7 },
+                { kind: 'copper', layer: 'B.Cu', thicknessMm: 0.035 },
+            ],
+        },
+    },
+    diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
+});
+assert.equal(invalidStackupApplication.copperLayerCount, undefined);
+assert.equal(invalidStackupApplication.diagnostics[0].code, 'EASYEDA_STACKUP_COPPER_LAYER_COUNT_UNSUPPORTED');
+assert.equal(invalidStackupApplication.diagnostics[0].severity, 'error');
 
 const values = {
     clearanceMm: 0.22, edgeClearanceMm: 0.5,

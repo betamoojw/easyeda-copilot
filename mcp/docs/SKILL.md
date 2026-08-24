@@ -1,23 +1,40 @@
 ---
 name: easyeda-copilot-mcp
-description: Use when EasyEDA Copilot MCP tools are available. This local skill file is the entry point for EasyEDA schematic, PCB placement, assembly, DRC, preview, and routing workflows.
+description: Create, modify, place, route, or review EasyEDA schematics and PCBs with EasyEDA Copilot MCP tools. Supports independent schematic, placement, mechanics, routing, and verification tasks.
 ---
 
 # EasyEDA Copilot MCP
 
-Use this skill when an EasyEDA Copilot MCP server provides EasyEDA schematic and PCB tools.
+Complete only the stage requested by the user. A schematic task does not authorize PCB work; placement does not authorize routing.
 
-The local files in this directory are the documentation source for MCP work. Do not fetch server prompt endpoints for MCP context. Read only the docs needed for the task.
+## Start
 
-## References
+1. If multiple EasyEDA windows may be connected, call `list_easyeda_instances` and select the intended instance.
+2. Call `get_current_project_info` once when the project tree or exact document is unknown.
+3. Select one task mode below and read only its references.
+4. Open the exact schematic page or PCB before inspecting or changing it.
 
-- `circuit-maker/instructions.md`: circuit creation and schematic modification rules.
-- `pcb-layout/dsl.ts`: authoritative PCB placement DSL declarations. Use this before writing `make_pcb_layout` code.
-- `pcb-layout/instructions.md`: PCB placement workflow, heuristics, anti-patterns, and examples.
-- `pcb-layout/mcp-workflow.md`: MCP-specific flow for placement, async operation handling, assembly, preview, and DRC.
-- `pcb-layout/examples/`: full reference layout files. Use them as patterns after reading `dsl.ts`; if an example conflicts with `dsl.ts`, `dsl.ts` wins.
-- `pcb-drc/rules.md`: PCB DRC export/edit/apply workflow, including differential pair handling.
+| Task | Read | Stop when |
+|---|---|---|
+| Complete schematic-to-PCB project | `workflow.md`, then each stage reference when reached | requested final stage is checked |
+| Create or organize schematic pages | `schematic/project-and-pages.md` | functional pages exist and are named |
+| Create, modify, or beautify a schematic | `schematic/workflow.md`, `schematic/circuit-mod.md` | current-page readback is checked |
+| Place or update PCB components | `pcb-layout/instructions.md`, `pcb-layout/dsl.ts` | approved placement is assembled and checked; do not route |
+| Change connectors, outline, holes, controls, displays, or antennas | placement docs plus `pcb-layout/mechanical-validation.md` | LLM and user approve mechanics |
+| Apply layer count, rules, zones, copper, or routing | `pcb-routing/instructions.md` and the router DSL path reported by the tool | requested PCB operation is checked |
+| Inspect or verify without mutation | `verification.md` | requested evidence is reported |
 
-## PCB Contract
+## Required behavior
 
-`make_pcb_layout` creates placement only: outline, mechanical objects, components, synthetic pads, holes, and designator positions. It does not route tracks, create copper pours, or configure DRC. Read `pcb-layout/mcp-workflow.md` before calling it.
+- New or substantially expanded schematics must use functional EasyEDA schematic pages.
+- `beautify_schematic_on_current_page` rebuilds the entire current page. Every current-page component must appear in exactly one functional block.
+- After `import_pcb_changes`, stop and ask the user to confirm the EasyEDA import dialog. Do not continue until the user says it is complete.
+- Open the target PCB before `make_pcb_layout`; this supplies its outline and component positions to `preserve(...)`.
+- Placement preview is not applied. Assemble only a completed final `layoutId`, after user approval.
+- Long placement and routing calls are complete only after `wait_operation` returns a terminal result.
+- Existing PCB copper and objects are preserved by placement assembly. Existing routing is preserved by the router unless `clearRouting(...)` explicitly selects copper to replace.
+- Never restore a successfully applied checkpoint automatically. Report the result and ask the user before restoring.
+
+## Finish
+
+Report changed documents, checks performed, unresolved findings, and the next requested stage. Do not suggest work beyond the user's requested boundary.

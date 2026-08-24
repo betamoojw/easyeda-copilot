@@ -1,74 +1,60 @@
-# PCB Placement Instructions
+# PCB placement
 
-`make_pcb_layout` is placement-only. EasyEDA v3/client tools perform routing, copper pours, DRC, and tuning after assembly.
+`make_pcb_layout` creates placement and mechanics only. It returns a preview and stored `layoutId`; it does not apply the result or authorize routing.
 
-## Source Of Truth
+Read `dsl.ts` as the exact syntax source. The files in `examples/` are patterns, not authority.
 
-- `dsl.ts` defines the available DSL. Do not invent helpers or use hidden/stale options.
-- Keep the schematic immutable: never rename its nets, pins, designators, `part_uuid`, or `footprint_uuid`.
-- Coordinates are millimeters from board center; positive X is right and positive Y is down.
-- `examples/` contains complete references. Copy the structure, then recheck every designator, pin, and net against the current schematic.
+## Start
 
-## Workflow
+1. Resolve the BOARD, linked schematic, and target PCB with `get_current_project_info`.
+2. If schematic changes must be imported, call `import_pcb_changes`, then **stop and ask the user to confirm the EasyEDA import dialog**. Continue only after confirmation.
+3. Open the target PCB before `make_pcb_layout`. The MCP captures its outline and linked schematic-component positions as `existingPlacement`.
+4. Call `get_pcb_component_sizes` once for the required components or, when board sizing requires it, the full board.
+5. Select one preservation mode before writing DSL.
 
-1. Read `dsl.ts`, this file, and the closest complete example.
-2. Make a **mechanical preview** first: board outline, holes, constraint regions, board pads, connectors, buttons, displays, LEDs, and other edge-facing parts. Use `solver({ preview: true, placeOnlyComponents: [...] })`.
-3. Open `previewSvgPath` and show that image to the user. Ask for explicit confirmation of the mechanics. A preview is never assembled.
-4. After confirmation, remove preview filters and write the complete block/module/component layout.
-5. Run full placement, inspect `previewSvgPath`, and fix fatal errors only.
-6. Show the final placement to the user for approval. Assemble only after that approval.
-7. Route and run DRC in EasyEDA v3/client tools.
+| Intent | DSL |
+|---|---|
+| New PCB or full re-placement | do not call `preserve` |
+| Keep current outline; re-place components | `preserve({ board: true })` |
+| Add/place new components; keep existing placement | `preserve({ board: true, components: "all" })` |
+| Move selected existing components | preserve an explicit list of every component that must not move |
 
-If `make_pcb_layout` returns `status: "pending"`, call `wait_pcb_layout({ operationId })`. Otherwise use its completed result directly.
+`components: "all"` preserves current schematic components whose centers are inside the board outline. Explicitly list an outside-board component that must stay fixed. Do not use `"all"` when an existing component must move.
 
-## Errors And Warnings
+## Run
 
-Fix before assembly:
+1. Define the board, holes, blocks, components, and only justified constraints in one complete placement DSL file.
+2. If mechanics changed, read `mechanical-validation.md` and run a focused mechanical preview with `solver({ preview: true, placeOnlyComponents: [...] })`.
+3. Call `make_pcb_layout({ file })`. If it returns `status: "running"`, call `wait_operation({ operation_id })` until terminal.
+4. Inspect `previewSvgPath` and solver diagnostics. A preview result is never assembled.
+5. Fix hard errors and one obvious in-scope visual problem; do not chase zero warnings.
+6. Show the preview and ask for user approval.
+7. Remove preview filters when full placement is requested, run the complete DSL, wait when needed, and inspect the final preview.
+8. Ask for final placement approval.
+9. Keep the target PCB open and call `assemble_pcb_layout_on_current_pcbdoc({ layoutId })` only with the completed final `layoutId`.
+10. Run targeted live-PCB checks and stop unless routing was explicitly requested.
 
-- invalid DSL, invalid target references, or missing footprint;
-- `fatal_overlap` and `outside_board`;
-- disconnected physical blocks, unless the block intentionally has `allowDisconnected: true`.
+Assembly preserves existing copper and board objects. It replaces the existing outline only when the placement result contains a new valid outline. The solver receives existing outline and schematic-component positions, but not every copper or mechanical primitive; check an incrementally changed routed board after assembly.
 
-Warnings are review context, not an optimization backlog. Fix one only when it visibly harms the requested result or violates an explicit requirement: e.g. a USB connector faces inward, a crystal/USB/RF/switch-loop critical path is obviously too long, or a block is visibly malformed. Make at most one focused revision. Do not chase zero warnings.
-
-## Placement Defaults
-
-Use `board.auto(...)` unless the board has fixed mechanical dimensions. For normal compact boards start with:
-
-- `density: 0.4`;
-- component `clearance: 0.35` mm, normally within `0.25-0.5` mm;
-- board `edge: 2` mm unless mechanics require another value;
-- `grid: 0.5` or `1` mm.
-
-`clearance` is evaluated against placement footprint bounds, which include silkscreen/body geometry. Do not use old `1.3` mm placement clearance by default: it makes normal boards artificially sparse. Increase it only for intentional mechanical/routing space around large connectors or dense ICs.
-
-For `capCluster`, start with `gap: 0.3` mm; use `0.25-0.4` mm unless an electrical or mechanical reason requires more. The footprint bounds already supply additional visible separation.
-
-Use `compactness: "high"` only when board area is genuinely constrained.
-
-## Structure
+## Placement structure
 
 - Every real component belongs to exactly one block.
-- A block is one physical island and normally shares at least one non-GND net. Set `allowDisconnected: true` only for intentional mechanical/same-role arrays.
-- Keep blocks below roughly 12 components. Split by IC pin group, rail, side, or function.
+- A block is one physical island and normally shares a non-GND net. Use `allowDisconnected: true` only for intentional mechanical or same-role groups.
+- Keep blocks below 12 components. Split dense functions into local power, clock, flash, feedback, input, output, or interface islands.
+- Keep an IC with the local parts that make its stage work; do not group by component type.
 - Do not mix top and bottom components in one block.
-- Use a main block for an IC/core and small satellite blocks for clock, flash, decoupling, feedback, and similar local functions.
-- Modules are soft macro groups. Do not create a giant sparse module containing connectors on distant board edges.
+- Use modules as soft macro groups; do not put distant edge connectors into one sparse module.
+- Use a few hard `criticalPair` constraints only for dominant pad-to-pad paths.
+- Use `capCluster` for two or more capacitors sharing supply and return; use `bypass`, `veryNear`, or `criticalPair` for a single capacitor.
+- Use `fixed` only for a true mechanical coordinate.
+- Use `constraintRegion` for placement exclusion; it is not a copper keepout.
 
-## Constraints
+## Starting values
 
-- Use `coreIsland` and a small number of hard `criticalPair` constraints for dominant paths only.
-- Use `capCluster` for two or more capacitors sharing a power and return net. Use `bypass`, `veryNear`, or `criticalPair` for a single capacitor.
-- Use `edgeMount` only for a part that must physically overhang the board. Use `edgePlace` for buttons, LEDs, and controls that remain inside the outline.
-- Use `fixed` only for actual mechanical locks. Never fix normal ICs, passives, crystals, or inductors merely to improve a preview.
-- Use `componentGrid` for existing header/test/indicator arrays and `boardPad` for new synthetic board pads.
-- Use `constraintRegion` for placement-only antenna, display, USB-tongue, or mechanical exclusion areas. It is not a copper keepout.
+Use `board.auto(...)` unless dimensions are mechanically fixed. For an ordinary compact board, useful starting values are density `0.4`, component clearance `0.25-0.5 mm`, and grid `0.5` or `1 mm`. Footprint geometry and mechanics take priority.
 
-## Avoid
+`clearance` includes body and silkscreen bounds. Avoid a blanket `1.3 mm` clearance. For `capCluster`, a starting gap of `0.25-0.4 mm` is usually appropriate. Use `compactness: "high"` only when area is genuinely constrained.
 
-- Full placement before the user confirms mechanical preview.
-- Assembly before the user confirms final placement.
-- One giant power/MCU block containing all support parts.
-- Normal components without block ownership or mixed layers in one block.
-- Manual coordinates to compensate for a bad electrical block structure.
-- Routing, copper, polygon, via, width, differential-pair, or length-matching rules in this DSL.
+## Result handling
+
+Warnings are review evidence, not an optimization backlog. Fix a warning when it violates a user requirement, mechanics, or a dominant electrical path. Never assemble before approval and never restore a checkpoint without user instruction.

@@ -481,6 +481,49 @@ async function readBoardPolygon() {
     return undefined;
 }
 
+export async function getPcbExistingPlacement() {
+    const document = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => undefined);
+    if (document?.documentType !== EDMT_EditorDocumentType.PCB) return undefined;
+
+    const [boardPolygon, primitives] = await Promise.all([
+        readBoardPolygon(),
+        eda.pcb_PrimitiveComponent.getAll(),
+    ]);
+    if (!boardPolygon?.length) return undefined;
+
+    const left = Math.min(...boardPolygon.map(point => point.x));
+    const right = Math.max(...boardPolygon.map(point => point.x));
+    const top = Math.min(...boardPolygon.map(point => point.y));
+    const bottom = Math.max(...boardPolygon.map(point => point.y));
+    const origin = {
+        x: (left + right) / 2,
+        y: (top + bottom) / 2,
+    };
+    const normalizeAngle = (angle: number) => ((angle % 360) + 360) % 360;
+
+    return {
+        board: {
+            polygon: boardPolygon.map(point => ({
+                x: round(point.x - origin.x, 10),
+                y: round(point.y - origin.y, 10),
+            })),
+        },
+        components: primitives.flatMap(primitive => {
+            const designator = primitive.getState_Designator()?.trim();
+            const layer = primitive.getState_Layer();
+            if (!designator || (layer !== EPCB_LayerId.TOP && layer !== EPCB_LayerId.BOTTOM)) return [];
+
+            return [{
+                designator,
+                x: round(milToMm(primitive.getState_X()) - origin.x, 10),
+                y: round(milToMm(primitive.getState_Y()) - origin.y, 10),
+                rotate: normalizeAngle(primitive.getState_Rotation()),
+                layer: layer === EPCB_LayerId.BOTTOM ? 'bottom' as const : 'top' as const,
+            }];
+        }),
+    };
+}
+
 async function readTrackSegments() {
     const lines = await eda.pcb_PrimitiveLine.getAll().catch(() => []);
     const segments: TrackSegment[] = [];

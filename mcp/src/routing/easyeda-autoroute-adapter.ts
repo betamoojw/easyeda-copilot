@@ -5,17 +5,19 @@ import type {
     RoutedZone,
     RoutingBoard,
     RoutingCopper,
+    RoutingClearIntent,
     RoutingDiagnostic,
+    RoutingPadShape,
     RoutingResult,
     RoutingRuleValues,
     RoutingRules,
-} from '@easyeda-copilot/router';
-import { validateRoutingBoard } from '@easyeda-copilot/router';
+} from 'eda-copilot-router';
+import { validateRoutingBoard } from 'eda-copilot-router';
 
 type JsonRecord = Record<string, unknown>;
 
 export type EasyEdaAutorouteCaptureOptions = Readonly<{
-    existingCopper?: 'fixed' | 'editable';
+    clearRouting?: RoutingClearIntent;
 }>;
 
 export type EasyEdaAutorouteImport = Readonly<{
@@ -24,14 +26,22 @@ export type EasyEdaAutorouteImport = Readonly<{
 }>;
 
 export type EasyEdaRoutingApplication = Readonly<{
-    /** Payload accepted by pcb_Document.importAutoRouteJsonFile. */
-    autorouteResult?: Readonly<{
-        progress: 1;
-        routabitity: number;
-        traces: readonly JsonRecord[];
-        vias: readonly JsonRecord[];
-    }>;
-    /** Host-native pours created after autoroute trace/via import. */
+    copperLayerCount?: number;
+    clearRouting?: RoutingClearIntent;
+    tracks: readonly Readonly<{
+        id?: string;
+        net: string;
+        layer: number;
+        widthMm: number;
+        points: readonly (readonly [number, number])[];
+    }>[];
+    vias: readonly Readonly<{
+        id?: string;
+        net: string;
+        location: readonly [number, number];
+        diameterMm: number;
+        drillMm: number;
+    }>[];
     zones: readonly Readonly<{
         id?: string;
         net: string;
@@ -40,7 +50,6 @@ export type EasyEdaRoutingApplication = Readonly<{
         holes: readonly (readonly (readonly number[])[])[];
         priority: number;
         minThicknessMm?: number;
-        connection?: string;
     }>[];
     rules: RoutingResult['rules'];
     diagnostics: readonly RoutingDiagnostic[];
@@ -71,7 +80,7 @@ function point(value: unknown): PointMm | undefined {
     if (!Array.isArray(value) || value.length < 2) return undefined;
     const x = finite(value[0]);
     const y = finite(value[1]);
-    return x === undefined || y === undefined ? undefined : { x, y: -y };
+    return x === undefined || y === undefined ? undefined : { x, y: y === 0 ? 0 : -y };
 }
 
 function path(value: unknown) {
@@ -101,17 +110,20 @@ function rotate(pointValue: PointMm, degrees: number): PointMm {
 }
 
 function internalLayerName(id: number) {
-    if (id === 1) return 'TOP';
-    if (id === 2) return 'BOTTOM';
-    if (id >= 15 && id <= 44) return `INNER_${id - 14}`;
+    // KRT expects KiCad's canonical copper-layer names internally.  The DSL
+    // remains EDA-neutral: TOP/BOTTOM/INNER_n selectors are resolved by layer
+    // side/index, and routing results are translated back to EasyEDA IDs.
+    if (id === 1) return 'F.Cu';
+    if (id === 2) return 'B.Cu';
+    if (id >= 15 && id <= 44) return `In${id - 14}.Cu`;
     return undefined;
 }
 
 function layerId(name: string) {
-    if (name === 'TOP') return 1;
-    if (name === 'BOTTOM') return 2;
-    const inner = /^INNER_(\d+)$/.exec(name);
-    return inner ? 14 + Number(inner[1]) : undefined;
+    if (name === 'F.Cu' || name === 'TOP') return 1;
+    if (name === 'B.Cu' || name === 'BOTTOM') return 2;
+    const inner = /^(?:In(\d+)\.Cu|INNER_(\d+))$/.exec(name);
+    return inner ? 14 + Number(inner[1] ?? inner[2]) : undefined;
 }
 
 function layerIds(value: unknown) {
@@ -130,6 +142,55 @@ function numberList(value: unknown) {
 
 function firstRecord(value: unknown) {
     return records(value)[0];
+}
+
+function rectangularPadShape(ring: readonly PointMm[]): RoutingPadShape | undefined {
+    if (ring.length !== 4) return undefined;
+    const xs = ring.map(item => item.x);
+    const ys = ring.map(item => item.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const widthMm = maxX - minX;
+    const heightMm = maxY - minY;
+    if (widthMm <= 0 || heightMm <= 0) return undefined;
+
+    // EasyEDA's polygon coordinates occasionally carry a few nanometres of
+    // numeric drift around the declared pad centre.  Keep a true offset or a
+    // non-rectangular quadrilateral as custom geometry, but encode ordinary
+    // rectangles with KiCad's native pad shape.  KRT's subtractive cleanup is
+    // substantially more reliable with native terminal geometry.
+    const tolerance = Math.max(1e-4, Math.max(widthMm, heightMm) * 1e-5);
+    if (Math.abs(minX + maxX) / 2 > tolerance || Math.abs(minY + maxY) / 2 > tolerance) {
+        return undefined;
+    }
+    const corners = new Set(ring.map(item => {
+        const x = Math.abs(item.x - minX) <= tolerance ? 0
+            : Math.abs(item.x - maxX) <= tolerance ? 1 : -1;
+        const y = Math.abs(item.y - minY) <= tolerance ? 0
+            : Math.abs(item.y - maxY) <= tolerance ? 1 : -1;
+        return `${x}:${y}`;
+    }));
+    if (corners.size !== 4 || [...corners].some(corner => corner.startsWith('-1') || corner.endsWith(':-1'))) {
+        return undefined;
+    }
+    return { kind: 'rect', widthMm, heightMm };
+}
+
+function importedPadShape(pad: JsonRecord, localAt: PointMm): RoutingPadShape | undefined {
+    const diameterMm = finite(pad.diameter);
+    if (diameterMm !== undefined && diameterMm > 0) {
+        return { kind: 'circle', diameterMm };
+    }
+
+    const ring = openRing(path(pad.path)).map(item => ({
+        x: item.x - localAt.x,
+        y: item.y - localAt.y,
+    }));
+    return rectangularPadShape(ring) ?? (ring.length >= 3
+        ? { kind: 'polygon', polygon: { outer: ring } }
+        : undefined);
 }
 
 function strictMaximum(values: readonly (number | undefined)[], fallback: number) {
@@ -266,7 +327,9 @@ export function importEasyEdaAutorouteJson(
     for (const [componentKey, componentValue] of Object.entries(componentRecords)) {
         const component = record(componentValue);
         if (!component) continue;
-        const designator = text(component.name) ?? componentKey;
+        // EasyEDA keys this object by schematic designator (J1, U1, ...).
+        // component.name is the library/MPN display name and is not unique.
+        const designator = componentKey;
         const at = point(component.location);
         const rotationDeg = -(finite(component.rotation) ?? 0);
         if (!at) {
@@ -289,14 +352,11 @@ export function importEasyEdaAutorouteJson(
             const localAt = localAtYUp;
             const placed = rotate(localAt, rotationDeg);
             const atPad = { x: at.x + placed.x, y: at.y + placed.y };
-            const ring = openRing(path(pad.path)).map(item => ({
-                x: item.x - localAt.x,
-                y: item.y - localAt.y,
-            }));
+            const shape = importedPadShape(pad, localAt);
             const net = text(componentNets[padKey]);
             if (net) netNames.add(net);
             const padLayers = layerIds(pad.layers);
-            if (ring.length < 3 || !padLayers.length) {
+            if (!shape || !padLayers.length) {
                 diagnostics.push({
                     code: 'EASYEDA_PAD_GEOMETRY_INVALID', severity: 'error',
                     message: `${designator}.${String(pinNames[padKey] ?? pad.number ?? padKey)} has unsupported geometry.`,
@@ -306,12 +366,15 @@ export function importEasyEdaAutorouteJson(
             pads.push({
                 id: `${designator}:${padKey}`,
                 component: designator,
-                number: String(pinNames[padKey] ?? pad.number ?? padKey),
+                // footprint pad numbers are the canonical DSL identity.
+                // component.pinName may contain display labels such as VIN,
+                // Ground, A, or K rather than the numeric pad number.
+                number: String(pad.number ?? pinNames[padKey] ?? padKey),
                 ...(net ? { net } : {}),
                 at: atPad,
                 rotationDeg,
                 layers: padLayers,
-                shape: { kind: 'polygon', polygon: { outer: ring } },
+                shape,
             });
         }
     }
@@ -374,11 +437,23 @@ export function importEasyEdaAutorouteJson(
         }];
     });
     const zones = importedZones(root, layerNames, diagnostics);
-    for (const zone of zones) netNames.add(zone.net);
+    for (const zone of zones) if (zone.net) netNames.add(zone.net);
     const importedCopper: RoutingCopper = { tracks: importedTracks, vias: importedVias, zones };
-    // EasyEDA apply replaces router-owned copper as one complete state, so
-    // existing autoroute copper is editable by default and is returned again.
-    const existingCopper = options.existingCopper ?? 'editable';
+    const selectedForClear = (net: string | undefined, item: RoutingClearIntent['items'][number]) => (
+        net !== undefined
+        && Boolean(options.clearRouting?.items.includes(item))
+        && (options.clearRouting?.nets === 'all' || options.clearRouting?.nets.includes(net))
+    );
+    const editable: RoutingCopper = {
+        tracks: importedCopper.tracks.filter(item => selectedForClear(item.net, 'tracks')),
+        vias: importedCopper.vias.filter(item => selectedForClear(item.net, 'vias')),
+        zones: importedCopper.zones.filter(item => selectedForClear(item.net, 'zones')),
+    };
+    const fixed: RoutingCopper = {
+        tracks: importedCopper.tracks.filter(item => !selectedForClear(item.net, 'tracks')),
+        vias: importedCopper.vias.filter(item => !selectedForClear(item.net, 'vias')),
+        zones: importedCopper.zones.filter(item => !selectedForClear(item.net, 'zones')),
+    };
     const board: RoutingBoard = {
         outline,
         cutouts: [],
@@ -388,9 +463,7 @@ export function importEasyEdaAutorouteJson(
         pads,
         keepouts: importedKeepouts(root, layerNames, diagnostics),
         rules,
-        copper: existingCopper === 'fixed'
-            ? { fixed: importedCopper, editable: EMPTY_COPPER }
-            : { fixed: EMPTY_COPPER, editable: importedCopper },
+        copper: options.clearRouting ? { fixed, editable } : { fixed: importedCopper, editable: EMPTY_COPPER },
     };
     const validation = validateRoutingBoard(board);
     diagnostics.push(...validation.diagnostics);
@@ -405,7 +478,33 @@ function toEasyEdaPoint(pointValue: PointMm) {
 
 export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEdaRoutingApplication {
     const diagnostics: RoutingDiagnostic[] = [];
-    if (!result.copper) return { zones: [], rules: result.rules, diagnostics: result.diagnostics };
+    let copperLayerCount: number | undefined;
+    if (result.stackup?.applyRequested) {
+        const requested = result.stackup.effective.layers.filter(layer => layer.kind === 'copper').length;
+        if (requested < 2 || requested > 32 || requested % 2 !== 0) {
+            diagnostics.push({
+                code: 'EASYEDA_STACKUP_COPPER_LAYER_COUNT_UNSUPPORTED',
+                severity: 'error',
+                message: `EasyEDA requires an even copper layer count from 2 to 32; router requested ${requested}.`,
+            });
+        } else {
+            copperLayerCount = requested;
+            diagnostics.push({
+                code: 'EASYEDA_STACKUP_LAYER_COUNT_ONLY',
+                severity: 'warning',
+                message: `EasyEDA will apply the ${requested}-layer copper count; physical thickness and material properties remain managed by the open board.`,
+            });
+        }
+    }
+    if (!result.copper) return {
+        ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
+        tracks: [],
+        vias: [],
+        zones: [],
+        ...(result.clearRouting ? { clearRouting: result.clearRouting } : {}),
+        rules: result.rules,
+        diagnostics: [...result.diagnostics, ...diagnostics],
+    };
     const traces = result.copper.tracks.flatMap((track, index) => {
         const layer = layerId(track.layer);
         if (!layer) {
@@ -416,20 +515,44 @@ export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEd
             return [];
         }
         return [{
-            id: track.id ?? `routing-result-track-${index}`,
+            id: track.id,
             layer,
             net: track.net,
-            width: track.widthMm,
-            path: track.points.map(toEasyEdaPoint),
+            widthMm: track.widthMm,
+            points: track.points.map(toEasyEdaPoint),
         }];
     });
-    const vias = result.copper.vias.map((via, index) => ({
-        id: via.id ?? `routing-result-via-${index}`,
-        location: toEasyEdaPoint(via.at),
-        net: via.net,
-        size: [via.diameterMm, via.drillMm],
-    }));
+    const vias = result.copper.vias.flatMap((via, index) => {
+        if (via.type && via.type !== 'through') {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_VIA_TYPE_UNSUPPORTED', severity: 'error',
+                message: `Via ${via.id ?? index} uses unsupported EasyEDA via type ${via.type}.`,
+            });
+            return [];
+        }
+        return [{
+            id: via.id,
+            location: toEasyEdaPoint(via.at),
+            net: via.net,
+            diameterMm: via.diameterMm,
+            drillMm: via.drillMm,
+        }];
+    });
     const zones = result.copper.zones.flatMap((zone, index) => {
+        if (!zone.net) {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_ZONE_NET_REQUIRED', severity: 'error',
+                message: `Zone ${zone.id ?? index} has no electrical net and cannot be applied safely in EasyEDA.`,
+            });
+            return [];
+        }
+        if (zone.outline.holes?.length) {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_ZONE_HOLES_UNSUPPORTED', severity: 'error',
+                message: `Zone ${zone.id ?? index} contains holes that the EasyEDA host adapter cannot preserve.`,
+            });
+            return [];
+        }
         const layers = zone.layers.map(layerId).filter((item): item is number => item !== undefined);
         if (layers.length !== zone.layers.length) {
             diagnostics.push({
@@ -443,19 +566,16 @@ export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEd
             net: zone.net,
             layers,
             outline: zone.outline.outer.map(toEasyEdaPoint),
-            holes: (zone.outline.holes ?? []).map(ring => ring.map(toEasyEdaPoint)),
+            holes: [],
             priority: zone.priority ?? 0,
             minThicknessMm: zone.minThicknessMm,
-            connection: zone.connection,
         }];
     });
     return {
-        autorouteResult: {
-            progress: 1,
-            routabitity: result.status === 'complete' ? 1 : 0,
-            traces,
-            vias,
-        },
+        ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
+        ...(result.clearRouting ? { clearRouting: result.clearRouting } : {}),
+        tracks: traces,
+        vias,
         zones,
         rules: result.rules,
         diagnostics: [...result.diagnostics, ...diagnostics],

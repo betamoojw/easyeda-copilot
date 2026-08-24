@@ -28,15 +28,16 @@ PCB features are available through MCP clients, not through the built-in Copilot
 The MCP integration can:
 
 - generate board outline and component placement from a schematic;
+- preserve the opened PCB outline and selected existing component positions during incremental placement;
 - create mechanical and final placement previews before import;
 - assemble approved placement into the opened EasyEDA PCB document;
-- run the bundled auto-router and import the generated tracks;
-- rebuild GND pours and stitching vias after auto-routing;
-- clear existing routing when it must be regenerated;
+- run `eda-copilot-router` DSL programs through the managed KRT backend;
+- create requested planes and stitching vias from the same routing DSL;
+- replace selected existing copper only when the DSL explicitly calls `clearRouting(...)`;
 - preview and inspect PCB objects, nets, and components;
 - run EasyEDA PCB DRC and manage the copper-layer count.
 
-Typical workflow: review mechanical preview, approve final placement, import it into the target PCB document, then route and run DRC. Existing tracks are preserved by default; clear routing before requesting a full reroute.
+Typical workflow: synchronize schematic changes, stop while the user confirms the EasyEDA import dialog, open the target PCB, review mechanical and final placement previews, assemble the approved placement, then run `run_pcb_router_dsl` and review native DRC. Existing placement can be retained with the placement DSL `preserve(...)`; existing copper is preserved by default and is replaced only when the routing DSL explicitly calls `clearRouting(...)`. Continue long placement and routing work with `wait_operation`.
 
 ## Build
 
