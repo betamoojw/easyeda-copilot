@@ -752,6 +752,16 @@ async function applyPcbDrcRules(bundle: PcbDrcBundle, saveCheckpoint = true) {
     };
 }
 
+async function routingTransactionStep<T>(stage: string, action: () => Promise<T>) {
+    try {
+        return await action();
+    } catch (error) {
+        throw new Error(
+            `Routing transaction ${stage} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+}
+
 async function saveCurrentDocument(document: IDMT_EditorDocumentItem) {
     if (document.documentType === EDMT_EditorDocumentType.SCHEMATIC_PAGE) {
         return await eda.sch_Document.save();
@@ -1055,7 +1065,10 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             const checkpointId = await checkpointer.save(false);
             if (!checkpointId) throw new Error('Failed to create routing transaction checkpoint.');
             try {
-                const rules = bundle === undefined ? undefined : await applyPcbDrcRules(bundle, false);
+                const rules = bundle === undefined ? undefined : await routingTransactionStep(
+                    'DRC rule application',
+                    () => applyPcbDrcRules(bundle, false),
+                );
                 const hasCopperMutation = Boolean(
                     application.clearRouting
                     || application.tracks.length
@@ -1063,9 +1076,15 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                     || application.zones.length,
                 );
                 const copper = hasCopperMutation
-                    ? await applyRoutingCopper(application)
+                    ? await routingTransactionStep(
+                        'copper application',
+                        () => applyRoutingCopper(application),
+                    )
                     : undefined;
-                const drc = await checkPcbDrc(100);
+                const drc = await routingTransactionStep(
+                    'native DRC verification',
+                    () => checkPcbDrc(100),
+                );
                 const violationCount = drc.reduce((categoryTotal, category) => (
                     categoryTotal + category.list.reduce((groupTotal, group) => groupTotal + group.list.length, 0)
                 ), 0);

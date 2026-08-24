@@ -74,6 +74,15 @@ async function executeRoutingOperation(
         throw new Error(`EasyEDA routing import failed:\n${diagnosticsMessage(imported.diagnostics)}`);
     }
 
+    const routerInput = {
+        board: imported.board,
+        dsl: program,
+    };
+    await writeFile(
+        join(artifactsDirectory, 'copilot-router-input.json'),
+        `${JSON.stringify(routerInput, null, 2)}\n`,
+    );
+
     context.setStage('routing');
     const backend = createKrtBackend({
         artifactsDirectory: join(artifactsDirectory, 'krt'),
@@ -84,10 +93,8 @@ async function executeRoutingOperation(
         AbortSignal.timeout(ROUTER_TIMEOUT_MS),
     ]);
     const result = await run({
-        board: imported.board,
-        dsl: program,
+        ...routerInput,
         backend,
-        policy: { profile: 'completion-first' },
         signal,
     });
     await writeFile(
@@ -102,6 +109,10 @@ async function executeRoutingOperation(
 
     context.setStage('preparing_application');
     const application = routingResultToEasyEdaApplication(result);
+    await writeFile(
+        join(artifactsDirectory, 'easyeda-routing-application.json'),
+        `${JSON.stringify(application, null, 2)}\n`,
+    );
     const unsupported = adapterErrors(result, application.diagnostics);
     if (unsupported.length) throw new Error(diagnosticsMessage(unsupported));
     const bundle = result.rules.applyRequested

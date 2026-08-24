@@ -10,6 +10,10 @@ const MIN_COPPER_WIDTH_MM = 0.01;
 const SAME_POINT_EPS = 1e-9;
 const PCB_CLEAR_TIMEOUT_MS = 5000;
 const PCB_POST_CLEAR_SETTLE_MS = 500;
+const VIA_SOLDER_MASK_EXPANSION: IPCB_PrimitiveSolderMaskAndPasteMaskExpansion = {
+    topSolderMask: 0,
+    bottomSolderMask: 0,
+};
 
 type BoardPoint = {
     x: number;
@@ -268,21 +272,11 @@ async function commitPrimitive<T extends DoneablePrimitive<T>>(primitive: T | un
     return await Promise.resolve(primitive.done());
 }
 
-async function commitPourCopperRegion(pour: IPCB_PrimitivePour, strict = false) {
-    const poured = await pour.rebuildCopperRegion();
-    if (!poured) {
-        if (strict) throw new Error(`PCB polygon copper rebuild returned empty region: ${pour.getState_Net()}`);
-        warning(`PCB polygon copper rebuild returned empty region: ${pour.getState_Net()}`);
-    } else if (poured.isAsync()) {
-        await Promise.resolve(poured.done());
-    }
-}
-
 async function createCommittedPour(args: {
     net: string;
     layer: TPCB_LayersOfCopper;
     polygon: IPCB_Polygon;
-    preserveSilos: boolean;
+    preserveSilos?: boolean;
     pourName: string;
     pourPriority: number;
     lineWidth: number;
@@ -297,7 +291,6 @@ async function createCommittedPour(args: {
             pourName,
             args.pourPriority,
             args.lineWidth,
-            false,
         );
         if (!pour) throw new Error(message);
         return pour;
@@ -311,10 +304,16 @@ async function createCommittedPour(args: {
             ESYS_LogType.WARNING,
         );
 
-        return await create(
-            undefined,
-            `create returned undefined after retry: ${(firstError as Error).message}`,
-        );
+        try {
+            return await create(
+                undefined,
+                `create returned undefined after retry: ${(firstError as Error).message}`,
+            );
+        } catch (retryError) {
+            throw new Error(
+                `PCB pour create failed after retry: ${retryError instanceof Error ? retryError.message : String(retryError)}`,
+            );
+        }
     }
 }
 
@@ -569,7 +568,7 @@ async function drawVias(vias: BoardAssemble["vias"]) {
                         diameter,
                         EPCB_PrimitiveViaType.VIA,
                         null,
-                        {},
+                        VIA_SOLDER_MASK_EXPANSION,
                         false,
                     ),
                     "create returned undefined",
@@ -767,7 +766,7 @@ async function drawRoutingVias(vias: RoutingCopperApplication['vias']) {
                 diameter,
                 EPCB_PrimitiveViaType.VIA,
                 null,
-                {},
+                VIA_SOLDER_MASK_EXPANSION,
                 false,
             );
             if (!primitive) throw new Error(`Failed to create routed via ${label}`);
@@ -781,53 +780,117 @@ async function drawRoutingVias(vias: RoutingCopperApplication['vias']) {
 }
 
 async function drawRoutingZones(zones: RoutingCopperApplication['zones']) {
+    const pending: Array<{
+        pour: IPCB_PrimitivePour;
+        zoneLabel: string;
+        layerValue: number;
+    }> = [];
     for (const zone of zones) {
         const points = normalizePolygonPoints(zone.points);
         for (const layerValue of zone.layers) {
-            const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(points));
-            if (!polygon) throw new Error(`Invalid routing zone geometry: ${zone.id ?? zone.net}`);
-            const pour = await createCommittedPour({
-                net: zone.net,
-                layer: routingCopperLayer(layerValue),
-                polygon,
-                preserveSilos: false,
-                pourName: `copilot-router:${zone.id ?? zone.net}`,
-                pourPriority: zone.priority ?? 0,
-                lineWidth: mmToMil(zone.minThicknessMm ?? DEFAULT_POUR_LINE_WIDTH_MM),
-            });
-            await commitPourCopperRegion(pour, true);
+            const zoneLabel = zone.id ?? zone.net;
+            try {
+                const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(points));
+                if (!polygon) throw new Error('invalid polygon geometry');
+                const pour = await createCommittedPour({
+                    net: zone.net,
+                    layer: routingCopperLayer(layerValue),
+                    polygon,
+                    pourName: safePrimitiveName('copilot_router', zoneLabel, `L${layerValue}`),
+                    pourPriority: zone.priority ?? 0,
+                    lineWidth: mmToMil(zone.minThicknessMm ?? DEFAULT_POUR_LINE_WIDTH_MM),
+                });
+                pending.push({ pour, zoneLabel, layerValue });
+            } catch (error) {
+                throw new Error(
+                    `Failed to apply routing zone ${zoneLabel} on layer ${layerValue}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
             await yieldToEventLoop();
         }
+    }
+    return pending;
+}
+
+async function rebuildRoutingZones(pending: Awaited<ReturnType<typeof drawRoutingZones>>) {
+    const warnings: string[] = [];
+    let rebuilt = 0;
+    for (const item of pending) {
+        await yieldToEventLoop();
+        const primitiveId = item.pour.getState_PrimitiveId();
+        const hydrated = primitiveId
+            ? await eda.pcb_PrimitivePour.get(primitiveId).catch(() => undefined)
+            : undefined;
+        const candidates = hydrated && hydrated !== item.pour
+            ? [hydrated, item.pour]
+            : [hydrated ?? item.pour];
+        let lastError = '';
+        let poured: IPCB_PrimitivePoured | undefined;
+        for (const candidate of candidates) {
+            try {
+                poured = await candidate.rebuildCopperRegion();
+                if (poured) break;
+                lastError = 'rebuild returned an empty region';
+            } catch (error) {
+                lastError = error instanceof Error ? error.message : String(error);
+            }
+        }
+        if (poured) {
+            rebuilt++;
+        } else {
+            warnings.push(`${item.zoneLabel} layer ${item.layerValue}: ${lastError || 'unknown rebuild error'}`);
+        }
+    }
+    if (warnings.length) {
+        warning(
+            `PCB pour outlines were created, but ${warnings.length} layer(s) require manual rebuild with Shift+B: ${warnings.join('; ')}`,
+        );
+    }
+    return { rebuilt, pending: warnings.length, warnings };
+}
+
+async function routingApplicationStep<T>(stage: string, action: () => Promise<T>) {
+    try {
+        return await action();
+    } catch (error) {
+        throw new Error(
+            `Routing ${stage} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
     }
 }
 
 /** Apply a validated router result after the caller has created one outer checkpoint. */
 export async function applyRoutingCopper(application: RoutingCopperApplication) {
-    const activeLayers = new Set((await getCopperLayers()).map(Number));
+    const activeLayers = new Set((await routingApplicationStep(
+        'layer validation',
+        getCopperLayers,
+    )).map(Number));
     for (const layer of application.tracks.map(item => item.layer).concat(
         application.zones.flatMap(item => item.layers),
     )) {
         if (!activeLayers.has(layer)) throw new Error(`Routing result targets inactive copper layer: ${layer}`);
     }
 
-    const cleared = application.clearRouting ? await clearCurrentPcbBoard({
+    const cleared = application.clearRouting ? await routingApplicationStep('copper cleanup', () => clearCurrentPcbBoard({
         preserveBoardOutline: true,
         strict: true,
         items: [...application.clearRouting.items],
         ...(application.clearRouting.nets === 'all'
             ? {}
             : { clearOnlyNet: [...application.clearRouting.nets] }),
-    }) : undefined;
-    await drawRoutingTracks(application.tracks);
-    await drawRoutingVias(application.vias);
-    await drawRoutingZones(application.zones);
-    await refreshPcbState(true);
+    })) : undefined;
+    await routingApplicationStep('track creation', () => drawRoutingTracks(application.tracks));
+    await routingApplicationStep('via creation', () => drawRoutingVias(application.vias));
+    const pendingZones = await routingApplicationStep('zone creation', () => drawRoutingZones(application.zones));
+    await routingApplicationStep('ratline refresh', () => refreshPcbState(true));
+    const zoneRebuild = await routingApplicationStep('zone rebuild', () => rebuildRoutingZones(pendingZones));
     return {
         applied: true,
         cleared,
         tracks: application.tracks.length,
         vias: application.vias.length,
         zones: application.zones.length,
+        zoneRebuild,
     };
 }
 
