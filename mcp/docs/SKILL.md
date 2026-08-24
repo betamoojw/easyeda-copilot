@@ -10,7 +10,7 @@ Complete only the stage requested by the user. A schematic task does not authori
 ## Start
 
 1. If multiple EasyEDA windows may be connected, call `list_easyeda_instances` and select the intended instance.
-2. Call `get_current_project_info` once when the project tree or exact document is unknown.
+2. Call `get_all_projects` when the project is unknown and switch with `open_document({ project_uuid })`; it saves all open design tabs before switching. Then call `get_current_project_info` once when the document tree or exact document is unknown.
 3. Select one task mode below and read only its references.
 4. Open the exact schematic page or PCB before inspecting or changing it.
 

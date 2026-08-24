@@ -27,6 +27,7 @@ PCB features are available through MCP clients, not through the built-in Copilot
 
 The MCP integration can:
 
+- list the team/folder/project tree, create projects, and open a selected project;
 - generate board outline and component placement from a schematic;
 - preserve the opened PCB outline and selected existing component positions during incremental placement;
 - create mechanical and final placement previews before import;

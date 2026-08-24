@@ -3,23 +3,99 @@ import * as z from 'zod/v4';
 import { Bridge } from "../bridge";
 import { textResult } from "../utils/tool-result";
 
+export const OpenDocumentInputSchema = z.object({
+    document_uuid: z.string().trim().min(1).optional().describe('Document UUID from get_current_project_info.'),
+    project_uuid: z.string().trim().min(1).optional().describe('Project UUID from get_all_projects or create_doc.'),
+}).refine(
+    input => Number(input.document_uuid !== undefined) + Number(input.project_uuid !== undefined) === 1,
+    { message: 'Provide exactly one of document_uuid or project_uuid.' },
+);
+
+export const CreateDocInputSchema = z.object({
+    doc: z.union([
+        z.object({
+            doc_type: z.literal('board'),
+            schematic_uuid: z.string().min(1).optional().describe('Optional schematic UUID to link to the new board.'),
+            pcb_uuid: z.string().min(1).optional().describe('Optional PCB UUID to link to the new board.'),
+        }),
+        z.object({
+            doc_type: z.literal('schematic'),
+            board_name: z.string().min(1).optional().describe('Optional parent board name.'),
+        }),
+        z.object({
+            doc_type: z.literal('schematic_page'),
+            schematic_uuid: z.string().min(1).describe('Parent schematic UUID.'),
+        }),
+        z.object({
+            doc_type: z.literal('pcb'),
+            board_name: z.string().min(1).optional().describe('Optional parent board name.'),
+        }),
+        z.object({
+            doc_type: z.literal('project'),
+            project_friendly_name: z.string().trim().min(1).describe('Human-readable EasyEDA project name.'),
+            project_name: z.string().trim().regex(/^[A-Za-z0-9-]+$/).optional()
+                .describe('Optional unique identifier containing only ASCII letters, digits, and hyphens.'),
+            team_uuid: z.string().trim().min(1).optional().describe('Optional team UUID. Omit for a personal project.'),
+            folder_uuid: z.string().trim().min(1).optional().describe('Optional destination folder UUID.'),
+            description: z.string().trim().optional().describe('Optional project description.'),
+        }),
+    ]),
+});
+
+export async function openDocument(bridge: Bridge, input: z.infer<typeof OpenDocumentInputSchema>) {
+    return input.project_uuid
+        ? bridge.requestEasyEda('open-project', { projectUuid: input.project_uuid })
+        : bridge.requestEasyEda('open-document', { documentUuid: input.document_uuid });
+}
+
+export async function saveDoc(bridge: Bridge) {
+    return bridge.requestEasyEda('save-document');
+}
+
+export async function createDoc(bridge: Bridge, { doc }: z.infer<typeof CreateDocInputSchema>) {
+    switch (doc.doc_type) {
+        case 'schematic':
+            return bridge.requestEasyEda('create-schematic', { boardName: doc.board_name });
+        case 'schematic_page':
+            return bridge.requestEasyEda('create-schematic-page', { schematicUuid: doc.schematic_uuid });
+        case 'board':
+            return bridge.requestEasyEda('create-board', {
+                schematicUuid: doc.schematic_uuid,
+                pcbUuid: doc.pcb_uuid,
+            });
+        case 'pcb':
+            return bridge.requestEasyEda('create-pcb', { boardName: doc.board_name });
+        case 'project':
+            return bridge.requestEasyEda('create-project', {
+                projectFriendlyName: doc.project_friendly_name,
+                projectName: doc.project_name,
+                teamUuid: doc.team_uuid,
+                folderUuid: doc.folder_uuid,
+                description: doc.description,
+            });
+    }
+}
+
 export function registerDocsTools(server: McpServer, bridge: Bridge) {
 
     server.registerTool(
         'open_document',
         {
-            title: 'Open EasyEDA Project Document',
-            description: 'Open a schematic, schematic page, PCB, or panel document from the current EasyEDA project by document UUID.',
-            inputSchema: z.object({
-                document_uuid: z.string().min(1).describe('Document UUID from get_current_project_info.'),
-            }),
+            title: 'Open EasyEDA Project or Document',
+            description: 'Open either a project or a document by UUID. Before switching projects, every open EasyEDA schematic, PCB, and panel tab is saved; the switch is aborted if any save fails.',
+            inputSchema: OpenDocumentInputSchema,
         },
-        async ({ document_uuid }) => {
-            const result = await bridge.requestEasyEda('open-document', {
-                documentUuid: document_uuid,
-            });
-            return textResult(result);
+        async input => textResult(await openDocument(bridge, input)),
+    );
+
+    server.registerTool(
+        'save_doc',
+        {
+            title: 'Save Current EasyEDA Document',
+            description: 'Save the currently active EasyEDA schematic, PCB, or panel document.',
+            inputSchema: z.object({}),
         },
+        async () => textResult(await saveDoc(bridge)),
     );
 
     server.registerTool(
@@ -64,61 +140,11 @@ export function registerDocsTools(server: McpServer, bridge: Bridge) {
     server.registerTool(
         'create_doc',
         {
-            title: 'Create EasyEDA Doc',
-            description: 'Create a doc in the current EasyEDA project',
-            inputSchema: z.object({
-                doc: z.union([
-                    z.object({
-                        doc_type: z.literal('board'),
-                        schematic_uuid: z.string().min(1).optional().describe('Optional schematic UUID to link to the new board.'),
-                        pcb_uuid: z.string().min(1).optional().describe('Optional PCB UUID to link to the new board.'),
-                    }),
-                    z.object({
-                        doc_type: z.literal('schematic'),
-                        board_name: z.string().min(1).optional().describe('Optional parent board name.'),
-                    }),
-                    z.object({
-                        doc_type: z.literal('schematic_page'),
-                        schematic_uuid: z.string().min(1).describe('Parent schematic UUID.'),
-                    }),
-                    z.object({
-                        doc_type: z.literal('pcb'),
-                        board_name: z.string().min(1).optional().describe('Optional parent board name.'),
-                    }),
-                ]),
-            })
+            title: 'Create EasyEDA Project or Document',
+            description: 'Create a project, or create a document in the current EasyEDA project. Project creation uses an experimental EasyEDA beta API and does not open the new project.',
+            inputSchema: CreateDocInputSchema,
         },
-        async ({ doc }) => {
-            switch (doc.doc_type) {
-                case 'schematic': {
-                    const result = await bridge.requestEasyEda('create-schematic', {
-                        boardName: doc.board_name,
-                    });
-                    return textResult(result);
-                }
-                case 'schematic_page': {
-                    const result = await bridge.requestEasyEda('create-schematic-page', {
-                        schematicUuid: doc.schematic_uuid,
-                    });
-                    return textResult(result);
-                }
-                case 'board': {
-                    const result = await bridge.requestEasyEda('create-board', {
-                        schematicUuid: doc.schematic_uuid,
-                        pcbUuid: doc.pcb_uuid,
-                    });
-                    return textResult(result);
-                }
-                case 'pcb': {
-                    const result = await bridge.requestEasyEda('create-pcb', {
-                        boardName: doc.board_name,
-                    });
-                    return textResult(result);
-                }
-                default:
-                    throw new Error(`Unsupported create_doc doc_type`);
-            }
-        },
+        async input => textResult(await createDoc(bridge, input)),
     );
 
     server.registerTool(
