@@ -328,7 +328,10 @@ export function importEasyEdaAutorouteJson(
             pads.push({
                 id: `${designator}:${padKey}`,
                 component: designator,
-                number: String(pinNames[padKey] ?? pad.number ?? padKey),
+                // footprint pad numbers are the canonical DSL identity.
+                // component.pinName may contain display labels such as VIN,
+                // Ground, A, or K rather than the numeric pad number.
+                number: String(pad.number ?? pinNames[padKey] ?? padKey),
                 ...(net ? { net } : {}),
                 at: atPad,
                 rotationDeg,

@@ -95,8 +95,9 @@ async function executeRoutingOperation(
         `${JSON.stringify(result, null, 2)}\n`,
     );
     signal.throwIfAborted();
-    if (result.status === 'error') {
-        throw new Error(diagnosticsMessage(result.diagnostics) || 'PCB router DSL failed.');
+    const routingErrors = result.diagnostics.filter(item => item.severity === 'error');
+    if (result.status === 'error' || routingErrors.length) {
+        throw new Error(diagnosticsMessage(routingErrors) || 'PCB router DSL failed.');
     }
 
     context.setStage('preparing_application');
