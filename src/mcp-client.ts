@@ -6,7 +6,7 @@ import {
 } from './eda/pcb-assemble';
 import { checkpointer } from './eda/checkpointer';
 import { checkPcbDrc } from './eda/drc';
-import { getPcb, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
+import { getPcb, getPcbExistingPlacement, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
 import { getSchematic } from './eda/schematic';
 import '@copilot/shared/types/eda';
 import { ExplainCircuit } from '@copilot/shared/types/circuit';
@@ -1001,20 +1001,28 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
         }
 
         if (message.event === 'get-multi-page-schematic') {
-            await openSchematic();
-            const extractFootprintUuid = !!body.extractFootprintUuid;
-            const allPages = await eda.dmt_Schematic.getCurrentSchematicAllSchematicPagesInfo().catch(e => undefined);
-            if (!allPages || !allPages.length) throw new Error('Not open any sch or is empty sch');
+            const originalDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => undefined);
             const fullSch: ExplainCircuit = { components: [] };
+            try {
+                await openSchematic();
+                const extractFootprintUuid = !!body.extractFootprintUuid;
+                const allPages = await eda.dmt_Schematic.getCurrentSchematicAllSchematicPagesInfo().catch(() => undefined);
+                if (!allPages || !allPages.length) throw new Error('Not open any sch or is empty sch');
 
-            for (const page of allPages) {
-                await eda.dmt_EditorControl.openDocument(page.uuid);
-                await new Promise(resolve => setTimeout(resolve, 400));
-                const primitiveIds = await eda.sch_PrimitiveComponent.getAllPrimitiveId().catch(() => []);
-                const schematic = await getSchematic([...primitiveIds], { extractFootprintUuid, disableExtractPos: true });
-                fullSch.components.push(...schematic.components);
+                for (const page of allPages) {
+                    await eda.dmt_EditorControl.openDocument(page.uuid);
+                    await delay(400);
+                    const primitiveIds = await eda.sch_PrimitiveComponent.getAllPrimitiveId().catch(() => []);
+                    const schematic = await getSchematic([...primitiveIds], { extractFootprintUuid, disableExtractPos: true });
+                    fullSch.components.push(...schematic.components);
+                }
+            } finally {
+                const currentDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo().catch(() => undefined);
+                if (originalDocument?.uuid && currentDocument?.uuid !== originalDocument.uuid) {
+                    await eda.dmt_EditorControl.openDocument(originalDocument.uuid);
+                    await delay(400);
+                }
             }
-
             reply(true, fullSch);
             return;
         }
@@ -1026,6 +1034,11 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
 
         if (message.event === 'get-pcb-raw') {
             reply(true, await getPcbRaw());
+            return;
+        }
+
+        if (message.event === 'get-pcb-existing-placement') {
+            reply(true, await getPcbExistingPlacement());
             return;
         }
 

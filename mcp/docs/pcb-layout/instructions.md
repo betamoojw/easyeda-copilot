@@ -10,6 +10,7 @@ board outline is replaced only when the result contains a new valid outline.
 - Keep the schematic immutable: never rename its nets, pins, designators, `part_uuid`, or `footprint_uuid`.
 - Coordinates are millimeters from board center; positive X is right and positive Y is down.
 - `examples/` contains complete references. Copy the structure, then recheck every designator, pin, and net against the current schematic.
+- Use `preserve({ board: true, components: "all" })` when the current EasyEDA outline and placement must remain fixed. A component list may be used instead of `"all"`.
 
 ## Workflow
 

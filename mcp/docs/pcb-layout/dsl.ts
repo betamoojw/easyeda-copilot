@@ -124,6 +124,16 @@ declare const board: {
   polygon(points: Array<{ x: number; y: number }>, options?: PolygonBoardOptions): void;
 };
 
+interface PreserveOptions {
+  /** Use the current EasyEDA PCB Board Outline. */
+  board?: boolean;
+  /** Preserve explicit components, or every current component whose center is inside the board outline. */
+  components?: "all" | string[];
+}
+
+/** Preserve positions loaded from the currently open EasyEDA PCB. */
+declare function preserve(options: PreserveOptions): void;
+
 interface BoardHoleOptions {
   /** Board anchor that defines the reference point. Component/block-relative holes are intentionally unsupported for now. */
   at: Extract<TargetRef, { type: "board_anchor" }>;

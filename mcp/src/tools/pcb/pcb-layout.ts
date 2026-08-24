@@ -11,6 +11,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import sharp from 'sharp';
 import { SKILL_DOC_PATH } from "../../utils/dirs";
 import { operationManager, type OperationContext } from '../../operations/manager';
+import type { ExplainCircuit } from '@copilot/shared/types/circuit';
 
 type MakePcbLayoutResponse = {
     content?: string;
@@ -70,6 +71,44 @@ const DEFAULT_PCB_LAYOUT_WAIT_MS = 30_000;
 const PCB_DOCUMENT_RESOURCE = 'current-pcb-document';
 
 const storedPcbLayouts = new Map<string, StoredPcbLayout>();
+
+const ExistingPlacementSchema = z.object({
+    board: z.object({
+        polygon: z.array(z.object({
+            x: z.number(),
+            y: z.number(),
+        }).strict()).min(3),
+    }).strict(),
+    components: z.array(z.object({
+        designator: z.string().min(1),
+        x: z.number(),
+        y: z.number(),
+        rotate: z.number(),
+        layer: z.enum(['top', 'bottom']),
+    }).strict()),
+}).strict();
+
+type ExistingPlacement = z.infer<typeof ExistingPlacementSchema>;
+
+function placementForCircuit(value: unknown, circuit: ExplainCircuit): ExistingPlacement | undefined {
+    if (value === undefined || value === null) return undefined;
+    const placement = ExistingPlacementSchema.parse(value);
+    const circuitDesignators = new Map(circuit.components.map(component => [
+        component.designator.trim().toUpperCase(),
+        component.designator,
+    ]));
+    const seen = new Set<string>();
+    const components = placement.components.flatMap(component => {
+        const key = component.designator.trim().toUpperCase();
+        const designator = circuitDesignators.get(key);
+        if (!designator) return [];
+        if (seen.has(key)) throw new Error(`Ambiguous EasyEDA PCB designator: ${designator}`);
+        seen.add(key);
+        return [{ ...component, designator }];
+    });
+
+    return { board: placement.board, components };
+}
 
 
 function previewImageExtension(mimeType: string | undefined) {
@@ -232,14 +271,24 @@ async function runPcbLayout(
     context: OperationContext,
 ) {
     context.setStage('preparing');
-    const [code, circuit] = await Promise.all([
+    // Capture placement before schematic extraction changes the active EasyEDA document.
+    const [code, rawExistingPlacement] = await Promise.all([
         readFile(file, 'utf8'),
-        bridge.requestEasyEda('get-multi-page-schematic', { extractFootprintUuid: true }),
+        bridge.requestEasyEda('get-pcb-existing-placement'),
     ]);
+    const circuit = await bridge.requestEasyEda(
+        'get-multi-page-schematic',
+        { extractFootprintUuid: true },
+    ) as ExplainCircuit;
+    const existingPlacement = placementForCircuit(rawExistingPlacement, circuit);
     context.signal.throwIfAborted();
 
     context.setStage('starting_remote');
-    const remoteOperationId = await startAsyncTask(PCB_LAYOUT_TASK_PATH, { code, circuit });
+    const remoteOperationId = await startAsyncTask(PCB_LAYOUT_TASK_PATH, {
+        code,
+        circuit,
+        ...(existingPlacement ? { existingPlacement } : {}),
+    });
     context.onCancel(() => cancelAsyncTask(PCB_LAYOUT_TASK_PATH, remoteOperationId));
     context.signal.throwIfAborted();
 
@@ -311,7 +360,7 @@ export function registerPcbLayoutTools(server: McpServer, bridge: Bridge) {
         'make_pcb_layout',
         {
             title: 'Make PCB Layout',
-            description: `Create PCB component placement from the current EasyEDA schematic using JavaScript PCB layout DSL code. Long work returns an operation_id for wait_operation. Server-side routing is disabled: route the assembled PCB later in EasyEDA/client tools. This tool does not assemble the board. For PCB layout docs, read the local docs folder: ${SKILL_DOC_PATH}`,
+            description: `Create PCB component placement using JavaScript PCB layout DSL code. Open the target EasyEDA PCB first so its outline and component positions are supplied as existingPlacement. Long work returns an operation_id for wait_operation. Server-side routing is disabled: route the assembled PCB later in EasyEDA/client tools. This tool does not assemble the board. For PCB layout docs, read the local docs folder: ${SKILL_DOC_PATH}`,
             inputSchema: z.object({
                 file: z.string().min(1).describe('Path to a JavaScript PCB layout DSL code file.'),
                 wait_ms: z.number().int().min(1_000).max(55_000).default(DEFAULT_PCB_LAYOUT_WAIT_MS)

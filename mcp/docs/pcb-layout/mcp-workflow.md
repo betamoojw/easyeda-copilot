@@ -2,6 +2,10 @@
 
 Read `dsl.ts` for syntax and `instructions.md` for placement rules. `make_pcb_layout` is placement-only.
 
+Open the target EasyEDA PCB before calling `make_pcb_layout`. The MCP captures
+its outline and component positions as `existingPlacement` before reading the
+linked multi-page schematic.
+
 ## Tools
 
 - `make_pcb_layout({ file })` reads the local DSL and current schematic, runs placement, stores the BoardAssemble payload in MCP memory, and returns report + `layoutId` + preview paths.
