@@ -9,7 +9,6 @@ const DEFAULT_POUR_LINE_WIDTH_MM = 0.15;
 const MIN_COPPER_WIDTH_MM = 0.01;
 const SAME_POINT_EPS = 1e-9;
 const PCB_CLEAR_TIMEOUT_MS = 5000;
-const PCB_POST_CLEAR_SETTLE_MS = 500;
 const VIA_SOLDER_MASK_EXPANSION: IPCB_PrimitiveSolderMaskAndPasteMaskExpansion = {
     topSolderMask: 0,
     bottomSolderMask: 0,
@@ -345,26 +344,28 @@ async function drawBoardOutline(board: BoardAssemble["board"]) {
         return;
     }
 
-    const oldOutlineLines = await eda.pcb_PrimitiveLine.getAll(undefined, EPCB_LayerId.BOARD_OUTLINE).catch(() => []);
-    if (oldOutlineLines.length) {
-        await eda.pcb_PrimitiveLine.delete(oldOutlineLines).catch(error => {
-            warning(`PCB board outline cleanup failed: ${(error as Error).message}`);
-            return false;
-        });
-    }
-
-    const oldOutlinePolylines = await eda.pcb_PrimitivePolyline.getAll(undefined, EPCB_LayerId.BOARD_OUTLINE).catch(() => []);
-    if (oldOutlinePolylines.length) {
-        await eda.pcb_PrimitivePolyline.delete(oldOutlinePolylines).catch(error => {
-            warning(`PCB board outline polyline cleanup failed: ${(error as Error).message}`);
-            return false;
-        });
-    }
-
     const polygon = eda.pcb_MathPolygon.createPolygon(polygonSource(board.polygon));
     if (!polygon) {
         warning("PCB board outline skipped: invalid polygon geometry");
         return;
+    }
+
+    const oldOutlineLines = await eda.pcb_PrimitiveLine.getAll(undefined, EPCB_LayerId.BOARD_OUTLINE);
+    if (oldOutlineLines.length) {
+        const deleted = await eda.pcb_PrimitiveLine.delete(oldOutlineLines);
+        if (!deleted) throw new Error("Failed to delete existing board outline lines");
+    }
+
+    const oldOutlineArcs = await eda.pcb_PrimitiveArc.getAll(undefined, EPCB_LayerId.BOARD_OUTLINE);
+    if (oldOutlineArcs.length) {
+        const deleted = await eda.pcb_PrimitiveArc.delete(oldOutlineArcs);
+        if (!deleted) throw new Error("Failed to delete existing board outline arcs");
+    }
+
+    const oldOutlinePolylines = await eda.pcb_PrimitivePolyline.getAll(undefined, EPCB_LayerId.BOARD_OUTLINE);
+    if (oldOutlinePolylines.length) {
+        const deleted = await eda.pcb_PrimitivePolyline.delete(oldOutlinePolylines);
+        if (!deleted) throw new Error("Failed to delete existing board outline polylines");
     }
 
     await commitPrimitive(
@@ -954,22 +955,6 @@ async function refreshPcbState(strict = false) {
     }
 }
 
-function delay(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function saveCurrentPcbDocument() {
-    const document = await eda.dmt_SelectControl.getCurrentDocumentInfo();
-    if (!document || document.documentType !== EDMT_EditorDocumentType.PCB) {
-        throw new Error("Current document is not a PCB");
-    }
-
-    const saved = await eda.pcb_Document.save(document.uuid);
-    if (!saved) throw new Error(`Failed to save PCB document: ${document.uuid}`);
-
-    await delay(PCB_POST_CLEAR_SETTLE_MS);
-}
-
 async function assembleBoardTask(board: BoardAssemble) {
     if (VERSION_EDASYEDA[0] < 3) throw new Error(`EasyEda version required >= 3, current ${VERSION_EDASYEDA[0]}`);
     const startTimeTotal = Date.now();
@@ -1008,8 +993,6 @@ async function assembleBoardTask(board: BoardAssemble) {
         eda.sys_Log.add(`PCB assemble warning: ${message}`, ESYS_LogType.WARNING);
     }
 
-    await runStep("Clear PCB board", clearCurrentPcbBoard);
-    await runStep("Save PCB after clear", saveCurrentPcbDocument);
     await runStep("Draw board outline", () => drawBoardOutline(board.board));
     await runStep("Place components", () => placeComponents(board.components));
     await runStep("Draw pads", () => drawPads(board.pads));

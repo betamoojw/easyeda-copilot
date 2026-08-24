@@ -1,6 +1,8 @@
 # PCB Placement Instructions
 
 `make_pcb_layout` is placement-only. EasyEDA v3/client tools perform routing, copper pours, DRC, and tuning after assembly.
+Applying its result preserves existing copper and board objects. An existing
+board outline is replaced only when the result contains a new valid outline.
 
 ## Source Of Truth
 

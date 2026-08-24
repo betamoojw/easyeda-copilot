@@ -8,6 +8,7 @@ Read `dsl.ts` for syntax and `instructions.md` for placement rules. `make_pcb_la
 - `wait_operation({ operation_id })` is needed only when `make_pcb_layout` returns `status: "running"` after its initial synchronous wait.
 - `cancel_operation({ operation_id })` stops an obsolete pending placement.
 - `assemble_pcb_layout_on_current_pcbdoc({ layoutId })` imports a previously completed final placement into the currently open PCB document.
+- Assembly preserves existing copper and mechanics. It replaces the current board outline only when the stored layout contains a new valid outline.
 
 `previewSvgPath` is the primary review image. `previewImagePath` is PNG fallback. `debugArtifacts` are optional local SVGs for a visibly bad block, family, or module.
 
