@@ -109,17 +109,20 @@ function rotate(pointValue: PointMm, degrees: number): PointMm {
 }
 
 function internalLayerName(id: number) {
-    if (id === 1) return 'TOP';
-    if (id === 2) return 'BOTTOM';
-    if (id >= 15 && id <= 44) return `INNER_${id - 14}`;
+    // KRT expects KiCad's canonical copper-layer names internally.  The DSL
+    // remains EDA-neutral: TOP/BOTTOM/INNER_n selectors are resolved by layer
+    // side/index, and routing results are translated back to EasyEDA IDs.
+    if (id === 1) return 'F.Cu';
+    if (id === 2) return 'B.Cu';
+    if (id >= 15 && id <= 44) return `In${id - 14}.Cu`;
     return undefined;
 }
 
 function layerId(name: string) {
-    if (name === 'TOP') return 1;
-    if (name === 'BOTTOM') return 2;
-    const inner = /^INNER_(\d+)$/.exec(name);
-    return inner ? 14 + Number(inner[1]) : undefined;
+    if (name === 'F.Cu' || name === 'TOP') return 1;
+    if (name === 'B.Cu' || name === 'BOTTOM') return 2;
+    const inner = /^(?:In(\d+)\.Cu|INNER_(\d+))$/.exec(name);
+    return inner ? 14 + Number(inner[1] ?? inner[2]) : undefined;
 }
 
 function layerIds(value: unknown) {
@@ -140,6 +143,40 @@ function firstRecord(value: unknown) {
     return records(value)[0];
 }
 
+function rectangularPadShape(ring: readonly PointMm[]): RoutingPadShape | undefined {
+    if (ring.length !== 4) return undefined;
+    const xs = ring.map(item => item.x);
+    const ys = ring.map(item => item.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const widthMm = maxX - minX;
+    const heightMm = maxY - minY;
+    if (widthMm <= 0 || heightMm <= 0) return undefined;
+
+    // EasyEDA's polygon coordinates occasionally carry a few nanometres of
+    // numeric drift around the declared pad centre.  Keep a true offset or a
+    // non-rectangular quadrilateral as custom geometry, but encode ordinary
+    // rectangles with KiCad's native pad shape.  KRT's subtractive cleanup is
+    // substantially more reliable with native terminal geometry.
+    const tolerance = Math.max(1e-4, Math.max(widthMm, heightMm) * 1e-5);
+    if (Math.abs(minX + maxX) / 2 > tolerance || Math.abs(minY + maxY) / 2 > tolerance) {
+        return undefined;
+    }
+    const corners = new Set(ring.map(item => {
+        const x = Math.abs(item.x - minX) <= tolerance ? 0
+            : Math.abs(item.x - maxX) <= tolerance ? 1 : -1;
+        const y = Math.abs(item.y - minY) <= tolerance ? 0
+            : Math.abs(item.y - maxY) <= tolerance ? 1 : -1;
+        return `${x}:${y}`;
+    }));
+    if (corners.size !== 4 || [...corners].some(corner => corner.startsWith('-1') || corner.endsWith(':-1'))) {
+        return undefined;
+    }
+    return { kind: 'rect', widthMm, heightMm };
+}
+
 function importedPadShape(pad: JsonRecord, localAt: PointMm): RoutingPadShape | undefined {
     const diameterMm = finite(pad.diameter);
     if (diameterMm !== undefined && diameterMm > 0) {
@@ -150,9 +187,9 @@ function importedPadShape(pad: JsonRecord, localAt: PointMm): RoutingPadShape | 
         x: item.x - localAt.x,
         y: item.y - localAt.y,
     }));
-    return ring.length >= 3
+    return rectangularPadShape(ring) ?? (ring.length >= 3
         ? { kind: 'polygon', polygon: { outer: ring } }
-        : undefined;
+        : undefined);
 }
 
 function strictMaximum(values: readonly (number | undefined)[], fallback: number) {

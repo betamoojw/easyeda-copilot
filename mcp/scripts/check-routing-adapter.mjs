@@ -53,10 +53,13 @@ const fixture = {
 const imported = adapter.importEasyEdaAutorouteJson(fixture);
 assert.ok(imported.board, JSON.stringify(imported.diagnostics));
 assert.equal(imported.diagnostics.filter(item => item.severity === 'error').length, 0);
+assert.deepEqual(imported.board.layers.map(item => item.name), ['F.Cu', 'B.Cu']);
 assert.deepEqual(imported.board.components.map(item => item.designator), ['U1', 'J1']);
 assert.equal(imported.board.pads.length, 3, 'duplicate logical pad numbers are physical pads, not an error');
 assert.deepEqual(imported.board.pads.map(item => item.number), ['1', '1', '1']);
 assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x: 1, y: -1 }, { x: -2, y: 0 }]);
+assert.deepEqual(imported.board.pads[0].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
+assert.deepEqual(imported.board.pads[1].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
 assert.deepEqual(imported.board.pads[2].shape, { kind: 'circle', diameterMm: 2.5 });
 assert.equal(imported.board.copper.editable.tracks.length, 0);
 assert.equal(imported.board.copper.fixed.tracks.length, 1);
@@ -82,8 +85,8 @@ const application = adapter.routingResultToEasyEdaApplication({
     status: 'complete', operation: 'route',
     rules: { effective: imported.board.rules, applyRequested: false, overriddenFields: [] },
     copper: {
-        tracks: [{ net: 'SIG', layer: 'TOP', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
-        vias: [{ net: 'SIG', at: { x: 2, y: -3 }, diameterMm: 0.6, drillMm: 0.3, fromLayer: 'TOP', toLayer: 'BOTTOM' }],
+        tracks: [{ net: 'SIG', layer: 'F.Cu', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
+        vias: [{ net: 'SIG', at: { x: 2, y: -3 }, diameterMm: 0.6, drillMm: 0.3, fromLayer: 'F.Cu', toLayer: 'B.Cu' }],
         zones: [],
     },
     diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
