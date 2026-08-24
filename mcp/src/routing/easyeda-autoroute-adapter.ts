@@ -7,6 +7,7 @@ import type {
     RoutingCopper,
     RoutingClearIntent,
     RoutingDiagnostic,
+    RoutingPadShape,
     RoutingResult,
     RoutingRuleValues,
     RoutingRules,
@@ -78,7 +79,7 @@ function point(value: unknown): PointMm | undefined {
     if (!Array.isArray(value) || value.length < 2) return undefined;
     const x = finite(value[0]);
     const y = finite(value[1]);
-    return x === undefined || y === undefined ? undefined : { x, y: -y };
+    return x === undefined || y === undefined ? undefined : { x, y: y === 0 ? 0 : -y };
 }
 
 function path(value: unknown) {
@@ -137,6 +138,21 @@ function numberList(value: unknown) {
 
 function firstRecord(value: unknown) {
     return records(value)[0];
+}
+
+function importedPadShape(pad: JsonRecord, localAt: PointMm): RoutingPadShape | undefined {
+    const diameterMm = finite(pad.diameter);
+    if (diameterMm !== undefined && diameterMm > 0) {
+        return { kind: 'circle', diameterMm };
+    }
+
+    const ring = openRing(path(pad.path)).map(item => ({
+        x: item.x - localAt.x,
+        y: item.y - localAt.y,
+    }));
+    return ring.length >= 3
+        ? { kind: 'polygon', polygon: { outer: ring } }
+        : undefined;
 }
 
 function strictMaximum(values: readonly (number | undefined)[], fallback: number) {
@@ -273,7 +289,9 @@ export function importEasyEdaAutorouteJson(
     for (const [componentKey, componentValue] of Object.entries(componentRecords)) {
         const component = record(componentValue);
         if (!component) continue;
-        const designator = text(component.name) ?? componentKey;
+        // EasyEDA keys this object by schematic designator (J1, U1, ...).
+        // component.name is the library/MPN display name and is not unique.
+        const designator = componentKey;
         const at = point(component.location);
         const rotationDeg = -(finite(component.rotation) ?? 0);
         if (!at) {
@@ -296,14 +314,11 @@ export function importEasyEdaAutorouteJson(
             const localAt = localAtYUp;
             const placed = rotate(localAt, rotationDeg);
             const atPad = { x: at.x + placed.x, y: at.y + placed.y };
-            const ring = openRing(path(pad.path)).map(item => ({
-                x: item.x - localAt.x,
-                y: item.y - localAt.y,
-            }));
+            const shape = importedPadShape(pad, localAt);
             const net = text(componentNets[padKey]);
             if (net) netNames.add(net);
             const padLayers = layerIds(pad.layers);
-            if (ring.length < 3 || !padLayers.length) {
+            if (!shape || !padLayers.length) {
                 diagnostics.push({
                     code: 'EASYEDA_PAD_GEOMETRY_INVALID', severity: 'error',
                     message: `${designator}.${String(pinNames[padKey] ?? pad.number ?? padKey)} has unsupported geometry.`,
@@ -318,7 +333,7 @@ export function importEasyEdaAutorouteJson(
                 at: atPad,
                 rotationDeg,
                 layers: padLayers,
-                shape: { kind: 'polygon', polygon: { outer: ring } },
+                shape,
             });
         }
     }

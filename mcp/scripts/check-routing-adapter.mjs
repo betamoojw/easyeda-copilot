@@ -22,8 +22,12 @@ const fixture = {
     ],
     components: {
         U1: {
-            name: 'U1', footprint: 'fp', layer: 1, location: [1, 2], rotation: 90,
+            name: 'SHARED-MPN', footprint: 'fp', layer: 1, location: [1, 2], rotation: 90,
             nets: { p0: 'SIG', p1: 'SIG' }, pinName: { p0: '1', p1: '1' },
+        },
+        J1: {
+            name: 'SHARED-MPN', footprint: 'tht', layer: 1, location: [-2, 0], rotation: 0,
+            nets: { p0: 'SIG_N' }, pinName: { p0: '1' },
         },
     },
     footprints: {
@@ -31,6 +35,14 @@ const fixture = {
             pads: {
                 p0: { number: '1', layers: [1], location: [1, 0], path: [[0.5, -0.5], [1.5, -0.5], [1.5, 0.5], [0.5, 0.5]] },
                 p1: { number: '1', layers: [1], location: [-1, 0], path: [[-1.5, -0.5], [-0.5, -0.5], [-0.5, 0.5], [-1.5, 0.5]] },
+            },
+        },
+        tht: {
+            pads: {
+                p0: {
+                    number: '1', layers: [1, 2], location: [0, 0], diameter: 2.5,
+                    path: [[1.25, 0], [-1.25, 0, -180], [1.25, 0, -180]],
+                },
             },
         },
     },
@@ -41,8 +53,10 @@ const fixture = {
 const imported = adapter.importEasyEdaAutorouteJson(fixture);
 assert.ok(imported.board, JSON.stringify(imported.diagnostics));
 assert.equal(imported.diagnostics.filter(item => item.severity === 'error').length, 0);
-assert.equal(imported.board.pads.length, 2, 'duplicate logical pad numbers are physical pads, not an error');
-assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x: 1, y: -1 }]);
+assert.deepEqual(imported.board.components.map(item => item.designator), ['U1', 'J1']);
+assert.equal(imported.board.pads.length, 3, 'duplicate logical pad numbers are physical pads, not an error');
+assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x: 1, y: -1 }, { x: -2, y: 0 }]);
+assert.deepEqual(imported.board.pads[2].shape, { kind: 'circle', diameterMm: 2.5 });
 assert.equal(imported.board.copper.editable.tracks.length, 0);
 assert.equal(imported.board.copper.fixed.tracks.length, 1);
 assert.equal(imported.board.rules.nets[0].values.preferredTrackWidthMm, 0.25);
