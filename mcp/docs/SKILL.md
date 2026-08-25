@@ -21,7 +21,7 @@ Complete only the stage requested by the user. A schematic task does not authori
 | Create, modify, or beautify a schematic | `schematic/workflow.md`, `schematic/circuit-mod.md` | current-page readback is checked |
 | Place or update PCB components | `pcb-layout/instructions.md`, `pcb-layout/dsl.ts` | approved placement is assembled and checked; do not route |
 | Change connectors, outline, holes, controls, displays, or antennas | placement docs plus `pcb-layout/mechanical-validation.md` | LLM and user approve mechanics |
-| Apply layer count, rules, zones, copper, or routing | `pcb-routing/instructions.md` and the router DSL path reported by the tool | requested PCB operation is checked |
+| Apply layer count, rules, zones, copper, or routing | `pcb-routing/instructions.md`, `pcb-routing/dsl.ts` | requested PCB operation is checked |
 | Inspect or verify without mutation | `verification.md` | requested evidence is reported |
 
 ## Required behavior
@@ -33,7 +33,8 @@ Complete only the stage requested by the user. A schematic task does not authori
 - Placement preview is not applied. Assemble only a completed final `layoutId`, after user approval.
 - Long placement and routing calls are complete only after `wait_operation` returns a terminal result.
 - Existing PCB copper and objects are preserved by placement assembly. Existing routing is preserved by the router unless `clearRouting(...)` explicitly selects copper to replace.
-- Never restore a successfully applied checkpoint automatically. Report the result and ask the user before restoring.
+- For stack-dependent routing intent, use verified physical data, declare and report a reasonable provisional stack, or ask for the missing data. Do not silently omit the semantic constraint.
+- After verification, decide whether to keep, repair, or restore the agent-applied result. Prefer a focused repair for a local error; restore a clearly invalid or broadly regressed result that cannot be repaired safely. Do not restore for a warning alone, and report the decision.
 
 ## Finish
 

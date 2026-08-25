@@ -21,6 +21,8 @@ Read `dsl.ts` as the exact syntax source. The files in `examples/` are patterns,
 
 `components: "all"` preserves current schematic components whose centers are inside the board outline. Explicitly list an outside-board component that must stay fixed. Do not use `"all"` when an existing component must move.
 
+Every placement DSL for an existing PCB must contain one `preserve(...)` declaration matching the selected mode. Keep it in the complete DSL used for mechanical preview, final placement, and any later placement repair. Omit it only for an intentional new-board or full re-placement result.
+
 ## Run
 
 1. Define the board, holes, blocks, components, and only justified constraints in one complete placement DSL file.
@@ -38,16 +40,26 @@ Assembly preserves existing copper and board objects. It replaces the existing o
 
 ## Placement structure
 
-- Every real component belongs to exactly one block.
+- Every new or movable real component belongs to exactly one explicit block. A component protected by `preserve({ components: ... })` may be omitted; the runtime gives otherwise unowned preserved components a system block.
 - A block is one physical island and normally shares a non-GND net. Use `allowDisconnected: true` only for intentional mechanical or same-role groups.
 - Keep blocks below 12 components. Split dense functions into local power, clock, flash, feedback, input, output, or interface islands.
 - Keep an IC with the local parts that make its stage work; do not group by component type.
 - Do not mix top and bottom components in one block.
 - Use modules as soft macro groups; do not put distant edge connectors into one sparse module.
 - Use a few hard `criticalPair` constraints only for dominant pad-to-pad paths.
+- Use one `signalPath` for an ordered chain through series components. Adjacent segments must enter and leave the shared component through different pins. It guides placement only; it does not create copper or impedance rules.
 - Use `capCluster` for two or more capacitors sharing supply and return; use `bypass`, `veryNear`, or `criticalPair` for a single capacitor.
 - Use `fixed` only for a true mechanical coordinate.
 - Use `constraintRegion` for placement exclusion; it is not a copper keepout.
+
+Example for connector -> series resistor -> IC:
+
+```js
+signalPath("USB_D+", [
+  [pin("J1", "A6"), pin("R1", "1")],
+  [pin("R1", "2"), pin("U1", "20")],
+]);
+```
 
 ## Starting values
 
@@ -57,4 +69,4 @@ Use `board.auto(...)` unless dimensions are mechanically fixed. For an ordinary 
 
 ## Result handling
 
-Warnings are review evidence, not an optimization backlog. Fix a warning when it violates a user requirement, mechanics, or a dominant electrical path. Never assemble before approval and never restore a checkpoint without user instruction.
+Warnings are review evidence, not an optimization backlog. Fix a warning when it violates a user requirement, mechanics, or a dominant electrical path. Never assemble before approval. After assembly, keep, repair, or restore based on verification; restore a clearly invalid result that cannot be repaired safely, not a warning alone.

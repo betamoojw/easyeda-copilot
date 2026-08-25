@@ -459,6 +459,13 @@ interface CriticalPairOptions {
   preferFacingPads?: boolean;
 }
 
+type SignalPathSegment = [PinTargetRef, PinTargetRef, CriticalPairOptions?];
+
+interface SignalPathOptions extends CriticalPairOptions {
+  /** Flexible paths may bend around other placement primitives. Straight paths strongly prefer one continuous axis. */
+  shape?: "flexible" | "straight";
+}
+
 interface CoreIslandOptions extends CriticalPairOptions {
   /** Dominant pin pairs inside this island. The island packer keeps these short before placing lower-priority components. Keep islands small and non-overlapping. */
   pairs?: Array<[PinTargetRef, PinTargetRef]>;
@@ -466,6 +473,8 @@ interface CoreIslandOptions extends CriticalPairOptions {
 
 /** Dominant pad-to-pad constraint for short critical electrical paths such as buck switch-node-to-inductor or RF matching pairs. Prefer one hard dominant pair plus soft secondary pairs. */
 declare function criticalPair(source: PinTargetRef, target: PinTargetRef, options?: CriticalPairOptions): void;
+/** Describe one ordered physical signal path across series components or functional blocks. Each tuple is one routable pad-to-pad segment; adjacent tuples must meet on the same through-component using different entry/exit pins. This is placement intent only and does not create copper or guarantee impedance. */
+declare function signalPath(name: string, segments: SignalPathSegment[], options?: SignalPathOptions): void;
 /** Bulk helper for the dominant pairs inside a functional block. Emits criticalPair() rules with stronger defaults. */
 declare function corePairs(blockName: string, pairs: Array<[PinTargetRef, PinTargetRef]>, options?: CriticalPairOptions): void;
 /** Define a critical placement island whose internal pair geometry is packed before normal block/component placement. Does not reassign components to blocks. Use for 2-3 dominant components; avoid several islands sharing the same main IC. */

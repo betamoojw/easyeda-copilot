@@ -8,10 +8,13 @@ Use this workflow without continuing to PCB work unless the user explicitly asks
 2. Open that page and read it with `get_current_page_schematic`.
 3. Search only unknown parts. Prefer a suitable proven reused block for a standard function.
 4. Apply related changes with `extract_circuit_on_current_page`. Prefer one coherent call per page; multiple calls are allowed when staged checking is safer.
+   - Inspect the returned `sheetSpace`.
+   - If less than `10%` remains, finish the current function and continue substantial independent work on another functional page.
 5. Run `beautify_schematic_on_current_page`:
    - required after removal, replacement, or connection reassignment;
    - recommended after completing a new AI-generated page;
    - requires every component on the current page, grouped exactly once.
+   - Keep `draw_block_box: false` unless the user wants Copilot-managed functional boxes and labels.
 6. Re-read the page only when exact connectivity readback is needed.
 7. Report the affected page and stop at the schematic boundary.
 
@@ -23,4 +26,4 @@ Beautify creates a checkpoint and restores it automatically if destructive page 
 2. Group all components by completed electrical function.
 3. Call beautify once.
 4. Check current-page readback.
-5. If the user dislikes the layout, offer to keep, revise, or restore it; never restore automatically.
+5. If verification proves the result electrically incomplete or wrong and a safe revision is unavailable, restore it. For a purely aesthetic preference, keep, revise, or restore according to the user's stated preference.

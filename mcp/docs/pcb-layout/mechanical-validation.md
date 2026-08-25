@@ -56,4 +56,4 @@ Inspect the focused solver preview before asking for approval:
 
 Fix an obvious in-scope error before presenting the preview. If a critical dimension or direction is unknown, ask one focused question rather than guessing.
 
-After assembly, use `inspect_component` and a focused `preview_pcb` when the live board must be checked against preserved copper or objects. Ask the user before restoring a checkpoint.
+After assembly, use `inspect_component` and a focused `preview_pcb` when the live board must be checked against preserved copper or objects. Restore the agent-applied placement when it is clearly mechanically invalid and no safe focused repair is available; do not restore for an aesthetic warning alone.

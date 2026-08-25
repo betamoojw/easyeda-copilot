@@ -6,6 +6,8 @@ Prefer the exact manufacturer MPN. A descriptive query such as `1k 1% 0805 resis
 
 Never invent an MPN or UUID. Confirm package, electrical ratings, tolerance, and relevant limits before selecting among candidates. Every added component requires a real non-null `part_uuid`.
 
+When several library results are electrically and mechanically equivalent, prefer the symbol whose returned `pin_name` values are meaningful, such as `VIN`, `EN`, or `GND`, over one whose names are only `1`, `2`, and `3`. Exact MPN, ratings, and footprint remain higher priority. Numeric pin names are normal for symmetric passives and are not a reason to reject them.
+
 ## Functional blocks
 
 Group components by a completed function and local signal path, not by component type.
@@ -24,6 +26,7 @@ Group components by a completed function and local signal path, not by component
 - Leave a signal empty only when the pin should remain unconnected; use `NC` for an intentional no-connect.
 - Do not add unrelated protection, filtering, or future signals unless requested or required by the selected proven block.
 - Combine known related changes, but do not force unrelated or risky work into one call merely to reduce tool count.
+- Read the returned `sheetSpace`. When it warns that less than `10%` remains, continue substantial new work on the appropriate functional page instead of packing more independent circuitry onto the current page.
 
 ## Reused blocks
 
