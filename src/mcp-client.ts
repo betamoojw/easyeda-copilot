@@ -12,11 +12,12 @@ import '@copilot/shared/types/eda';
 import { ExplainCircuit } from '@copilot/shared/types/circuit';
 import PQueue from 'p-queue';
 import {
-    PcbDrcDifferentialPairType,
     type PcbDrcBundle,
     type PcbDrcDifferentialPairRule,
-    type PcbDrcDifferentialPairSubRule,
-    type PcbDrcRuleObject,
+    type PcbDrcEqualLengthGroupRule,
+    type PcbDrcNetClassRule,
+    type PcbDrcNetRule,
+    type PcbDrcNetRuleEntry,
 } from '@copilot/shared/types/pcb/drc';
 
 type DesiredDifferentialPair = {
@@ -187,10 +188,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isDifferentialPairRule(rule: unknown): rule is PcbDrcDifferentialPairRule {
-    return Boolean(readDifferentialPairRule(rule));
-}
-
 function assertDrcBundle(value: unknown): asserts value is PcbDrcBundle {
     if (!isRecord(value) || !isRecord(value.ruleConfiguration) || !Array.isArray(value.netRules)) {
         throw new Error('Invalid PCB DRC bundle. Expected { ruleConfiguration, netRules }.');
@@ -348,264 +345,70 @@ async function getPcbStackLayers() {
     };
 }
 
-function isLayerMapName(name: string) {
-    return name === 'data' || name === 'tables';
-}
+type DesiredNamedNetGroup = { name: string; nets: string[]; };
 
-function isNumericObjectKey(key: string) {
-    return /^\d+$/.test(key);
-}
+const GENERATED_PRESET_FIELDS = [
+    'Track', 'Via Size', 'Safe Spacing', 'Differential Pair', 'Net Length Tolerance',
+] as const;
 
-function collectAllowedLayerMapKeys(value: unknown, path: string[] = [], result = new Map<string, Set<string>>()) {
-    if (!isRecord(value)) return result;
-
-    for (const [key, child] of Object.entries(value)) {
-        const childPath = [...path, key];
-
-        if (isLayerMapName(key) && isRecord(child)) {
-            const pathKey = childPath.join('.');
-            const keys = result.get(pathKey) ?? new Set<string>();
-            for (const childKey of Object.keys(child)) {
-                keys.add(childKey);
-            }
-            result.set(pathKey, keys);
-            continue;
-        }
-
-        collectAllowedLayerMapKeys(child, childPath, result);
-    }
-
-    return result;
-}
-
-function collectAllowedLayerMapKeysFromFamily(family: unknown) {
-    const result = new Map<string, Set<string>>();
-    if (!isRecord(family)) return result;
-
-    for (const preset of Object.values(family)) {
-        const presetKeys = collectAllowedLayerMapKeys(preset);
-
-        for (const [pathKey, keys] of presetKeys.entries()) {
-            const mergedKeys = result.get(pathKey) ?? new Set<string>();
-            for (const key of keys) {
-                mergedKeys.add(key);
-            }
-            result.set(pathKey, mergedKeys);
+function asNetRuleEntries(value: unknown): PcbDrcNetRuleEntry[] {
+    if (!Array.isArray(value)) throw new Error('EasyEDA returned malformed net rules.');
+    for (const item of value) {
+        if (!isRecord(item) || typeof item.type !== 'string' || typeof item.name !== 'string') {
+            throw new Error('EasyEDA returned malformed net rule data.');
         }
     }
-
-    return result;
+    return structuredClone(value) as PcbDrcNetRuleEntry[];
 }
 
-function validateLayerMapKeys(
-    value: unknown,
-    allowedKeysByPath: Map<string, Set<string>>,
-    path: Array<string | number>,
-    relativePath: string[] = [],
-    issues: string[] = [],
+function netRuleTemplate(netRules: readonly PcbDrcNetRuleEntry[], name: string): PcbDrcNetRule {
+    for (const rule of netRules) {
+        if (rule.type === 'net' && rule.name === name) return structuredClone(rule);
+        if (rule.type !== 'net') {
+            const child = rule.sub.find(item => item.name === name);
+            if (child) return structuredClone(child);
+        }
+    }
+    return { type: 'net', name };
+}
+
+function injectNamedGroups(
+    netRules: PcbDrcNetRuleEntry[],
+    groups: readonly DesiredNamedNetGroup[],
+    type: 'netClass' | 'equalLengthGroup',
 ) {
-    if (!isRecord(value)) return issues;
-
-    for (const [key, child] of Object.entries(value)) {
-        const childPath = [...path, key];
-        const childRelativePath = [...relativePath, key];
-
-        if (isLayerMapName(key) && isRecord(child)) {
-            const mapPath = childRelativePath.join('.');
-            const allowedKeys = allowedKeysByPath.get(mapPath);
-
-            for (const childKey of Object.keys(child)) {
-                if (isNumericObjectKey(childKey) || allowedKeys?.has(childKey)) continue;
-
-                issues.push(`${formatPath([...childPath, childKey])}: invalid key inside "${key}". ` +
-                    `This map is for layer/table indices, not preset names. Create a sibling preset in the rule family instead.`);
-            }
-
-            continue;
+    for (const group of groups) {
+        let rule = netRules.find(item => item.type === type && item.name === group.name) as
+            PcbDrcNetClassRule | PcbDrcEqualLengthGroupRule | undefined;
+        if (!rule) {
+            rule = { type, name: group.name, sub: [] } as PcbDrcNetClassRule | PcbDrcEqualLengthGroupRule;
+            netRules.push(rule);
         }
-
-        validateLayerMapKeys(child, allowedKeysByPath, childPath, childRelativePath, issues);
+        const current = new Map(rule.sub.map(item => [item.name, item]));
+        rule.sub = group.nets.map(name => structuredClone(current.get(name) ?? netRuleTemplate(netRules, name)));
     }
-
-    return issues;
-}
-
-function validateDrcRuleConfiguration(ruleConfiguration: PcbDrcRuleObject, baselineRuleConfiguration: PcbDrcRuleObject | undefined) {
-    const issues: string[] = [];
-
-    for (const [categoryName, category] of Object.entries(ruleConfiguration)) {
-        if (!isRecord(category)) continue;
-
-        const baselineCategory = baselineRuleConfiguration?.[categoryName];
-        if (baselineRuleConfiguration && !isRecord(baselineCategory)) {
-            issues.push(`ruleConfiguration[${JSON.stringify(categoryName)}]: unknown rule category.`);
-            continue;
-        }
-
-        for (const [familyName, family] of Object.entries(category)) {
-            if (!isRecord(family)) continue;
-
-            const baselineFamily = isRecord(baselineCategory) ? baselineCategory[familyName] : undefined;
-            if (isRecord(baselineCategory) && !isRecord(baselineFamily)) {
-                issues.push(`ruleConfiguration[${JSON.stringify(categoryName)}][${JSON.stringify(familyName)}]: unknown rule family.`);
-                continue;
-            }
-
-            const allowedLayerMapKeys = collectAllowedLayerMapKeysFromFamily(baselineFamily);
-
-            for (const [presetName, preset] of Object.entries(family)) {
-                validateLayerMapKeys(
-                    preset,
-                    allowedLayerMapKeys,
-                    ['ruleConfiguration', categoryName, familyName, presetName],
-                    [],
-                    issues,
-                );
-            }
-        }
-    }
-
-    if (!issues.length) return;
-
-    throw new Error([
-        'Invalid PCB DRC ruleConfiguration.',
-        ...issues.slice(0, 20),
-        issues.length > 20 ? `...and ${issues.length - 20} more issue(s).` : undefined,
-    ].filter(Boolean).join('\n'));
-}
-
-function getNetRuleByName(netRules: PcbDrcRuleObject[], netName: string) {
-    return netRules.find(rule => rule.type === 'net' && rule.name === netName);
-}
-
-function readDifferentialPairRule(rule: unknown): DesiredDifferentialPair | undefined {
-    if (!isRecord(rule) || rule.type !== PcbDrcDifferentialPairType || typeof rule.name !== 'string') {
-        return undefined;
-    }
-
-    if (typeof rule.positiveNet === 'string' && typeof rule.negativeNet === 'string') {
-        return {
-            name: rule.name,
-            positiveNet: rule.positiveNet,
-            negativeNet: rule.negativeNet,
-        };
-    }
-
-    return undefined;
-}
-
-function makeDifferentialPairSubRule(rule: PcbDrcRuleObject | undefined, name: string): PcbDrcDifferentialPairSubRule {
-    return {
-        ...(rule ?? {}),
-        type: 'net',
-        name,
-    };
-}
-
-function restoreDifferentialPairSubRule(rule: PcbDrcRuleObject, parentRule: PcbDrcDifferentialPairRule) {
-    const netRule = { ...rule };
-    if (Object.prototype.hasOwnProperty.call(parentRule, 'Differential Pair')) {
-        netRule['Differential Pair'] = parentRule['Differential Pair'];
-    }
-
-    return netRule;
 }
 
 function injectDifferentialPairsIntoNetRules(
-    netRules: PcbDrcRuleObject[],
-    differentialPairs: Array<{ name: string; positiveNet: string; negativeNet: string; }>,
+    netRules: PcbDrcNetRuleEntry[],
+    differentialPairs: readonly DesiredDifferentialPair[],
 ) {
-    const pairNetNames = new Set(differentialPairs.flatMap(pair => [pair.positiveNet, pair.negativeNet]));
-    const regularNetRules = netRules.filter(rule => !(rule.type === 'net'
-        && typeof rule.name === 'string'
-        && pairNetNames.has(rule.name)));
-
-    const syntheticRules = differentialPairs.map(pair => {
-        const positiveNetRule = getNetRuleByName(netRules, pair.positiveNet);
-        const negativeNetRule = getNetRuleByName(netRules, pair.negativeNet);
-        const pairRule: PcbDrcDifferentialPairRule = {
-            type: PcbDrcDifferentialPairType,
-            name: pair.name,
-            positiveNet: pair.positiveNet,
-            negativeNet: pair.negativeNet,
-            sub: [
-                makeDifferentialPairSubRule(positiveNetRule, pair.positiveNet),
-                makeDifferentialPairSubRule(negativeNetRule, pair.negativeNet),
-            ],
-        };
-
-        if (
-            positiveNetRule
-            && negativeNetRule
-            && positiveNetRule['Differential Pair'] === negativeNetRule['Differential Pair']
-            && positiveNetRule['Differential Pair'] !== undefined
-        ) {
-            pairRule['Differential Pair'] = positiveNetRule['Differential Pair'];
+    for (const pair of differentialPairs) {
+        let rule = netRules.find(item => item.type === 'differentialPair' && item.name === pair.name) as
+            PcbDrcDifferentialPairRule | undefined;
+        if (!rule) {
+            rule = {
+                type: 'differentialPair', name: pair.name,
+                positiveNet: pair.positiveNet, negativeNet: pair.negativeNet,
+                sub: [],
+            };
+            netRules.push(rule);
         }
-
-        return pairRule;
-    });
-
-    return [...regularNetRules, ...syntheticRules];
-}
-
-function splitDifferentialPairsFromNetRules(netRules: Array<PcbDrcRuleObject | PcbDrcDifferentialPairRule>) {
-    const extractedPairs: Array<{
-        rule: PcbDrcDifferentialPairRule;
-        pair: DesiredDifferentialPair;
-        hasSubRules: boolean;
-    }> = [];
-    const subNetNames = new Set<string>();
-    const regularNetRules: PcbDrcRuleObject[] = [];
-
-    for (const rule of netRules) {
-        if (!isDifferentialPairRule(rule)) continue;
-
-        const pair = readDifferentialPairRule(rule);
-        if (!pair) throw new Error(`Invalid differential pair rule: ${String(rule.name)}`);
-
-        const hasSubRules = Boolean(rule.sub?.length);
-
-        extractedPairs.push({ rule, pair, hasSubRules });
-
-        if (!hasSubRules) continue;
-        subNetNames.add(pair.positiveNet);
-        subNetNames.add(pair.negativeNet);
+        rule.positiveNet = pair.positiveNet;
+        rule.negativeNet = pair.negativeNet;
+        rule.sub = [pair.positiveNet, pair.negativeNet].map(name => ({ type: 'net', name }));
     }
-
-    for (const rule of netRules) {
-        if (isDifferentialPairRule(rule)) continue;
-        if (rule.type === 'net' && typeof rule.name === 'string' && subNetNames.has(rule.name)) continue;
-
-        regularNetRules.push(rule);
-    }
-
-    for (const { rule, pair, hasSubRules } of extractedPairs) {
-        if (hasSubRules) {
-            const positiveSub = rule.sub?.find(net => net.name === pair.positiveNet);
-            const negativeSub = rule.sub?.find(net => net.name === pair.negativeNet);
-
-            if (!positiveSub) throw new Error(`Differential pair ${pair.name} sub is missing positive net: ${pair.positiveNet}`);
-            if (!negativeSub) throw new Error(`Differential pair ${pair.name} sub is missing negative net: ${pair.negativeNet}`);
-
-            regularNetRules.push(restoreDifferentialPairSubRule(positiveSub, rule));
-            regularNetRules.push(restoreDifferentialPairSubRule(negativeSub, rule));
-            continue;
-        }
-
-        if (!Object.prototype.hasOwnProperty.call(rule, 'Differential Pair')) continue;
-
-        const positiveNetRule = getNetRuleByName(regularNetRules, pair.positiveNet);
-        const negativeNetRule = getNetRuleByName(regularNetRules, pair.negativeNet);
-
-        if (positiveNetRule) positiveNetRule['Differential Pair'] = rule['Differential Pair'];
-        if (negativeNetRule) negativeNetRule['Differential Pair'] = rule['Differential Pair'];
-    }
-
-    return {
-        regularNetRules,
-        differentialPairs: extractedPairs.map(item => item.pair),
-    };
+    return netRules;
 }
 
 function normalizeDifferentialPairArray(value: unknown[]) {
@@ -647,6 +450,146 @@ function normalizeDifferentialPairs(value: unknown) {
     }
 
     throw new Error('EasyEDA getAllDifferentialPairs() returned unsupported data.');
+}
+
+function normalizeNamedNetGroups(value: unknown, source: string): DesiredNamedNetGroup[] {
+    if (!Array.isArray(value)) {
+        throw new Error(`EasyEDA ${source} returned unsupported data.`);
+    }
+
+    return value.map(item => {
+        if (
+            !isRecord(item)
+            || typeof item.name !== 'string'
+            || !Array.isArray(item.nets)
+            || !item.nets.every(net => typeof net === 'string' && net.length > 0)
+        ) {
+            throw new Error(`EasyEDA returned malformed ${source} data.`);
+        }
+
+        return { name: item.name, nets: [...new Set(item.nets as string[])] };
+    });
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]) {
+    const sortedLeft = [...left].sort();
+    const sortedRight = [...right].sort();
+    return sortedLeft.length === sortedRight.length
+        && sortedLeft.every((item, index) => item === sortedRight[index]);
+}
+
+async function reconcileNamedNetGroups(options: {
+    kind: string;
+    desired: readonly DesiredNamedNetGroup[];
+    read: () => Promise<unknown>;
+    create: (name: string, nets: string[]) => Promise<boolean>;
+    remove: (name: string) => Promise<boolean>;
+}) {
+    const seen = new Set<string>();
+    for (const item of options.desired) {
+        if (seen.has(item.name)) throw new Error(`Duplicate ${options.kind} name: ${item.name}`);
+        seen.add(item.name);
+    }
+
+    const existing = normalizeNamedNetGroups(await options.read(), options.kind);
+    const desiredByName = new Map(options.desired.map(item => [item.name, item]));
+    const existingByName = new Map(existing.map(item => [item.name, item]));
+    const changedNames = new Set<string>();
+    const result = {
+        created: [] as string[],
+        deleted: [] as string[],
+        updated: [] as string[],
+        unchanged: [] as string[],
+    };
+
+    for (const item of existing) {
+        const desired = desiredByName.get(item.name);
+        const changed = desired !== undefined && !sameStringSet(item.nets, desired.nets);
+        if (desired && !changed) {
+            result.unchanged.push(item.name);
+            continue;
+        }
+
+        const success = await options.remove(item.name);
+        if (!success) throw new Error(`Failed to delete ${options.kind}: ${item.name}`);
+        if (changed) changedNames.add(item.name);
+        else result.deleted.push(item.name);
+    }
+
+    for (const desired of options.desired) {
+        if (existingByName.has(desired.name) && !changedNames.has(desired.name)) continue;
+        const success = await options.create(desired.name, [...desired.nets]);
+        if (!success) throw new Error(`Failed to create ${options.kind}: ${desired.name}`);
+        if (changedNames.has(desired.name)) result.updated.push(desired.name);
+        else result.created.push(desired.name);
+    }
+
+    return result;
+}
+
+function relationKey(rule: PcbDrcNetRuleEntry) {
+    return `${rule.type}\u0000${rule.name}`;
+}
+
+function generatedAssignments(rule: PcbDrcNetRuleEntry | PcbDrcNetRule) {
+    return GENERATED_PRESET_FIELDS.flatMap(field => {
+        const value = rule[field];
+        return typeof value === 'string' && value.startsWith('copilot_router_') ? [[field, value] as const] : [];
+    });
+}
+
+function collectRuleReadBackIssues(desired: PcbDrcNetRuleEntry, actual: PcbDrcNetRuleEntry) {
+    const issues: string[] = [];
+    if (desired.type !== actual.type || desired.name !== actual.name) {
+        return [`EasyEDA did not persist DRC scope: ${desired.type} ${desired.name}.`];
+    }
+    for (const [field, value] of generatedAssignments(desired)) if (actual[field] !== value) {
+        issues.push(`EasyEDA did not persist ${field} preset for ${desired.type} ${desired.name}.`);
+    }
+    if (desired.type === 'net') return issues;
+    if (actual.type === 'net' || !sameStringSet(desired.sub.map(item => item.name), actual.sub.map(item => item.name))) {
+        issues.push(`EasyEDA did not persist members for ${desired.type} ${desired.name}.`);
+        return issues;
+    }
+    const actualMembers = new Map(actual.sub.map(item => [item.name, item]));
+    for (const member of desired.sub) {
+        const found = actualMembers.get(member.name);
+        if (!found) {
+            issues.push(`EasyEDA did not persist member ${member.name} in ${desired.type} ${desired.name}.`);
+            continue;
+        }
+        for (const [field, value] of generatedAssignments(member)) if (found[field] !== value) {
+            issues.push(`EasyEDA did not persist ${field} preset for ${desired.type} ${desired.name}/${member.name}.`);
+        }
+    }
+    if (desired.type === 'differentialPair' && actual.type === 'differentialPair' && (
+        desired.positiveNet !== actual.positiveNet || desired.negativeNet !== actual.negativeNet
+    )) issues.push(`EasyEDA did not persist differential pair terminals for ${desired.name}.`);
+    return issues;
+}
+
+function collectDrcReadBackIssues(desired: PcbDrcBundle, actual: PcbDrcBundle) {
+    const issues: string[] = [];
+    const actualByKey = new Map(actual.netRules.map(rule => [relationKey(rule), rule]));
+    for (const rule of desired.netRules) {
+        const found = actualByKey.get(relationKey(rule));
+        if (!found) issues.push(`EasyEDA did not persist DRC scope: ${rule.type} ${rule.name}.`);
+        else issues.push(...collectRuleReadBackIssues(rule, found));
+    }
+    return issues;
+}
+
+async function inspectPcbDrcReadBack(desired: PcbDrcBundle) {
+    try {
+        const bundle = await exportPcbDrcRules();
+        const issues = collectDrcReadBackIssues(desired, bundle);
+        return { persisted: issues.length === 0, issues, bundle };
+    } catch (error) {
+        return {
+            persisted: false,
+            issues: [`EasyEDA DRC read-back was unavailable: ${error instanceof Error ? error.message : String(error)}`],
+        };
+    }
 }
 
 async function reconcileDifferentialPairs(desiredPairs: DesiredDifferentialPair[]) {
@@ -727,34 +670,100 @@ async function exportPcbDrcRules(): Promise<PcbDrcBundle> {
     const ruleConfiguration = await eda.pcb_Drc.getCurrentRuleConfiguration();
     if (!ruleConfiguration) throw new Error('Failed to read current PCB DRC rule configuration.');
 
-    const netRules = await eda.pcb_Drc.getNetRules();
-    const differentialPairs = normalizeDifferentialPairs(await eda.pcb_Drc.getAllDifferentialPairs());
+    const [netRules, rawNetClasses, rawDifferentialPairs, rawEqualLengthGroups] = await Promise.all([
+        eda.pcb_Drc.getNetRules(),
+        eda.pcb_Drc.getAllNetClasses(),
+        eda.pcb_Drc.getAllDifferentialPairs(),
+        eda.pcb_Drc.getAllEqualLengthNetGroups(),
+    ]);
+    const netClasses = normalizeNamedNetGroups(rawNetClasses, 'getAllNetClasses()');
+    const differentialPairs = normalizeDifferentialPairs(rawDifferentialPairs);
+    const equalLengthGroups = normalizeNamedNetGroups(rawEqualLengthGroups, 'getAllEqualLengthNetGroups()');
+    const normalizedNetRules = asNetRuleEntries(netRules);
+    injectNamedGroups(normalizedNetRules, netClasses, 'netClass');
+    injectNamedGroups(normalizedNetRules, equalLengthGroups, 'equalLengthGroup');
+    injectDifferentialPairsIntoNetRules(normalizedNetRules, differentialPairs);
 
     return {
         ruleConfiguration: ruleConfiguration.config,
-        netRules: injectDifferentialPairsIntoNetRules(netRules, differentialPairs),
+        netRules: normalizedNetRules,
     };
 }
 
-async function applyPcbDrcRules(bundle: PcbDrcBundle) {
-    const { regularNetRules, differentialPairs } = splitDifferentialPairsFromNetRules(bundle.netRules);
-    const currentRuleConfiguration = await eda.pcb_Drc.getCurrentRuleConfiguration();
-    if (!currentRuleConfiguration) throw new Error('Failed to read current PCB DRC rule configuration.');
-    validateDrcRuleConfiguration(bundle.ruleConfiguration, currentRuleConfiguration.config);
+function extractNetClasses(netRules: readonly PcbDrcNetRuleEntry[]): DesiredNamedNetGroup[] {
+    return netRules.filter((rule): rule is PcbDrcNetClassRule => rule.type === 'netClass')
+        .map(rule => ({ name: rule.name, nets: rule.sub.map(item => item.name) }));
+}
 
-    const differentialPairResult = await reconcileDifferentialPairs(differentialPairs);
+function extractEqualLengthGroups(netRules: readonly PcbDrcNetRuleEntry[]): DesiredNamedNetGroup[] {
+    return netRules.filter((rule): rule is PcbDrcEqualLengthGroupRule => rule.type === 'equalLengthGroup')
+        .map(rule => ({ name: rule.name, nets: rule.sub.map(item => item.name) }));
+}
+
+function extractDifferentialPairs(netRules: readonly PcbDrcNetRuleEntry[]): DesiredDifferentialPair[] {
+    return netRules.filter((rule): rule is PcbDrcDifferentialPairRule => rule.type === 'differentialPair')
+        .map(rule => ({ name: rule.name, positiveNet: rule.positiveNet, negativeNet: rule.negativeNet }));
+}
+
+function mergeNetRuleTrees(nativeRules: readonly PcbDrcNetRuleEntry[], desiredRules: readonly PcbDrcNetRuleEntry[]) {
+    const nativeByKey = new Map(nativeRules.map(rule => [relationKey(rule), rule]));
+    return desiredRules.map(desired => {
+        const native = nativeByKey.get(relationKey(desired));
+        if (!native || desired.type === 'net' || native.type === 'net') return { ...native, ...structuredClone(desired) } as PcbDrcNetRuleEntry;
+        const nativeMembers = new Map(native.sub.map(item => [item.name, item]));
+        return {
+            ...native,
+            ...structuredClone(desired),
+            sub: desired.sub.map(member => ({ ...nativeMembers.get(member.name), ...structuredClone(member) })),
+        } as PcbDrcNetRuleEntry;
+    });
+}
+
+async function applyPcbDrcRules(bundle: PcbDrcBundle) {
+    const netClasses = extractNetClasses(bundle.netRules);
+    const differentialPairs = extractDifferentialPairs(bundle.netRules);
+    const equalLengthGroups = extractEqualLengthGroups(bundle.netRules);
+
     const ruleConfiguration = await eda.pcb_Drc.overwriteCurrentRuleConfiguration(bundle.ruleConfiguration);
     if (!ruleConfiguration) throw new Error('Failed to overwrite current PCB DRC rule configuration.');
 
-    const netRules = await eda.pcb_Drc.overwriteNetRules(regularNetRules);
+    const netClassResult = await reconcileNamedNetGroups({
+        kind: 'net class',
+        desired: netClasses,
+        read: () => eda.pcb_Drc.getAllNetClasses(),
+        create: (name, nets) => eda.pcb_Drc.createNetClass(name, nets, null),
+        remove: name => eda.pcb_Drc.deleteNetClass(name),
+    });
+    const differentialPairResult = await reconcileDifferentialPairs(differentialPairs);
+    const equalLengthGroupResult = await reconcileNamedNetGroups({
+        kind: 'equal-length net group',
+        desired: equalLengthGroups,
+        read: () => eda.pcb_Drc.getAllEqualLengthNetGroups(),
+        create: (name, nets) => eda.pcb_Drc.createEqualLengthNetGroup(name, nets, null),
+        remove: name => eda.pcb_Drc.deleteEqualLengthNetGroup(name),
+    });
+
+    const nativeRules = asNetRuleEntries(await eda.pcb_Drc.getNetRules());
+    const finalNetRules = mergeNetRuleTrees(nativeRules, bundle.netRules);
+    const netRules = await eda.pcb_Drc.overwriteNetRules(finalNetRules);
     if (!netRules) throw new Error('Failed to overwrite PCB net rules.');
+    const verification = await inspectPcbDrcReadBack({ ...bundle, netRules: finalNetRules });
 
     return {
         applied: true,
         ruleConfiguration,
         netRules,
-        regularNetRules: regularNetRules.length,
+        netRuleScopes: finalNetRules.length,
+        netClasses: netClassResult,
         differentialPairs: differentialPairResult,
+        equalLengthGroups: equalLengthGroupResult,
+        verification: {
+            persisted: verification.persisted,
+            issues: verification.issues,
+            netClasses: verification.bundle ? extractNetClasses(verification.bundle.netRules).length : undefined,
+            differentialPairs: verification.bundle ? extractDifferentialPairs(verification.bundle.netRules).length : undefined,
+            equalLengthGroups: verification.bundle ? extractEqualLengthGroups(verification.bundle.netRules).length : undefined,
+        },
     };
 }
 

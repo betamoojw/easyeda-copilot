@@ -198,12 +198,16 @@ function strictMaximum(values: readonly (number | undefined)[], fallback: number
     return finiteValues.length ? Math.max(...finiteValues) : fallback;
 }
 
-function ruleForNet(root: JsonRecord, net: JsonRecord): RoutingRuleValues {
+function ruleForNet(root: JsonRecord, net: JsonRecord, differentialMember: boolean): RoutingRuleValues {
     const rules = record(root.rules) ?? {};
     const clearanceRule = firstRecord(record(rules.safeClearances)?.[String(net.safeClearance ?? '')]);
     const widthRule = firstRecord(record(rules.trackWidths)?.[String(net.trackWidth ?? '')]);
     const via = numberList(record(rules.viaSizes)?.[String(net.viaSize ?? '')]);
-    const differentialRule = firstRecord(record(rules.differentialPairs)?.[String(net.differentialPair ?? '')]);
+    // EasyEDA assigns a differential-rule preset to ordinary nets too. Pair
+    // membership is defined only by classes.differentialPairClasses.
+    const differentialRule = differentialMember
+        ? firstRecord(record(rules.differentialPairs)?.[String(net.differentialPair ?? '')])
+        : undefined;
     const widths = numberList(widthRule?.trackWidth);
     const differentialWidths = numberList(differentialRule?.width);
     const differentialGaps = numberList(differentialRule?.clearance);
@@ -383,12 +387,6 @@ export function importEasyEdaAutorouteJson(
         const name = text(entry.net);
         if (name) netNames.add(name);
     }
-    const perNetValues = new Map<string, RoutingRuleValues>();
-    for (const net of netEntries) {
-        const name = text(net.net);
-        if (name) perNetValues.set(name, ruleForNet(root, net));
-    }
-    const fallback = defaultRules([...perNetValues.values()]);
     const differentialPairs = Object.entries(record(record(root.classes)?.differentialPairClasses) ?? {})
         .flatMap(([id, members]) => {
             const nets = (Array.isArray(members) ? members : []).map(text)
@@ -402,6 +400,13 @@ export function importEasyEdaAutorouteJson(
             }
             return [{ id, positive: nets[0], negative: nets[1] }];
         });
+    const differentialMembers = new Set(differentialPairs.flatMap(pair => [pair.positive, pair.negative]));
+    const perNetValues = new Map<string, RoutingRuleValues>();
+    for (const net of netEntries) {
+        const name = text(net.net);
+        if (name) perNetValues.set(name, ruleForNet(root, net, differentialMembers.has(name)));
+    }
+    const fallback = defaultRules([...perNetValues.values()]);
     const rules: RoutingRules = {
         default: fallback,
         nets: [...netNames].sort().map(net => ({ net, values: perNetValues.get(net) ?? fallback })),

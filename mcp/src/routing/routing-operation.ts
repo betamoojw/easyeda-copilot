@@ -15,7 +15,11 @@ import {
     importEasyEdaAutorouteJson,
     routingResultToEasyEdaApplication,
 } from './easyeda-autoroute-adapter';
-import { routingRulesToEasyEdaDrcBundle } from './easyeda-drc-adapter';
+import {
+    diffRoutingRules,
+    mergeEasyEdaDrcIntoRoutingRules,
+    routingRulesToEasyEdaDrcBundle,
+} from './easyeda-drc-adapter';
 
 const PCB_DOCUMENT_RESOURCE = 'current-pcb-document';
 const ROUTER_TIMEOUT_MS = 60 * 60 * 1000;
@@ -74,8 +78,9 @@ async function executeRoutingOperation(
         throw new Error(`EasyEDA routing import failed:\n${diagnosticsMessage(imported.diagnostics)}`);
     }
 
+    const sourceRules = mergeEasyEdaDrcIntoRoutingRules(nativeDrc, imported.board.rules);
     const routerInput = {
-        board: imported.board,
+        board: { ...imported.board, rules: sourceRules },
         dsl: program,
     };
     await writeFile(
@@ -115,8 +120,10 @@ async function executeRoutingOperation(
     );
     const unsupported = adapterErrors(result, application.diagnostics);
     if (unsupported.length) throw new Error(diagnosticsMessage(unsupported));
-    const bundle = result.rules.applyRequested
-        ? routingRulesToEasyEdaDrcBundle(nativeDrc, result.rules.effective)
+    const shouldApplyDrc = result.operation === 'apply-drc' || result.operation === 'all';
+    const ruleChanges = diffRoutingRules(sourceRules, result.rules);
+    const bundle = shouldApplyDrc && ruleChanges.hasChanges
+        ? routingRulesToEasyEdaDrcBundle(nativeDrc, sourceRules, result.rules)
         : undefined;
     signal.throwIfAborted();
 
