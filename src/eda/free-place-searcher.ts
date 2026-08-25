@@ -6,15 +6,22 @@ interface Offset {
     y: number | undefined
 }
 
-export async function searchFreePlaceV2(targetPoint: { x: number, y: number }, tagetSize: { w: number, h: number }, ignoreDisgnators?: string[]): Promise<Offset> {
+export type SchematicOccupiedRect = {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+};
+
+const OCCUPIED_PADDING = 40;
+
+export async function getSchematicOccupiedRects(ignoreDesignators?: string[]): Promise<SchematicOccupiedRect[]> {
     let componentsOnSch = (await eda.sch_PrimitiveComponent.getAll().catch(e => []))
         .filter(c => c.getState_ComponentType() === ESCH_PrimitiveComponentType.COMPONENT ||
             c.getState_ComponentType() === ESCH_PrimitiveComponentType.NET_PORT || c.getState_ComponentType() === ESCH_PrimitiveComponentType.NET_FLAG)
 
-    if (ignoreDisgnators?.length)
-        componentsOnSch = componentsOnSch.filter(c => !ignoreDisgnators.includes(c.getState_Designator?.() ?? ''));
-
-    const PADDING = 40;
+    if (ignoreDesignators?.length)
+        componentsOnSch = componentsOnSch.filter(c => !ignoreDesignators.includes(c.getState_Designator?.() ?? ''));
 
     const busyRects = await Promise.all(componentsOnSch.map(async comp => {
         const bbox = await getBBox([comp]).catch(e => undefined);
@@ -27,10 +34,10 @@ export async function searchFreePlaceV2(targetPoint: { x: number, y: number }, t
             }
 
         return {
-            x: bbox.minX - PADDING,
-            y: normWireY(bbox.minY) + PADDING,
-            w: bbox.width + PADDING * 2,
-            h: bbox.height + PADDING * 2
+            x: bbox.minX - OCCUPIED_PADDING,
+            y: normWireY(bbox.minY) + OCCUPIED_PADDING,
+            w: bbox.width + OCCUPIED_PADDING * 2,
+            h: bbox.height + OCCUPIED_PADDING * 2
         }
     }));
     // eda.sys_Log.add(`busyRects[0]: ${JSON.stringify(busyRects[0])}`);
@@ -47,16 +54,22 @@ export async function searchFreePlaceV2(targetPoint: { x: number, y: number }, t
                 continue;
             }
             const rect = {
-                h: Math.abs(normWireY(segment[1]) - normWireY(segment[3])) + PADDING * 2,
-                w: Math.abs(segment[0] - segment[2]) + PADDING * 2,
-                y: Math.max(normWireY(segment[1]), normWireY(segment[3])) + PADDING,
-                x: Math.min(segment[0], segment[2]) - PADDING,
+                h: Math.abs(normWireY(segment[1]) - normWireY(segment[3])) + OCCUPIED_PADDING * 2,
+                w: Math.abs(segment[0] - segment[2]) + OCCUPIED_PADDING * 2,
+                y: Math.max(normWireY(segment[1]), normWireY(segment[3])) + OCCUPIED_PADDING,
+                x: Math.min(segment[0], segment[2]) - OCCUPIED_PADDING,
             };
             busyRects.push(rect);
 
             // eda.sys_Log.add(`Add busy wire segmemt: ${JSON.stringify(rect)}`);
         }
     }
+
+    return busyRects;
+}
+
+export async function searchFreePlaceV2(targetPoint: { x: number, y: number }, tagetSize: { w: number, h: number }, ignoreDisgnators?: string[]): Promise<Offset> {
+    const busyRects = await getSchematicOccupiedRects(ignoreDisgnators);
 
     const STEP = 80;
     eda.sys_Log.add(`Busy rects: ${JSON.stringify(busyRects)}`)

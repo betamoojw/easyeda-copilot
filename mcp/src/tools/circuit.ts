@@ -43,6 +43,25 @@ function serverAssembly(response: unknown) {
     return (record?.circuit || response) as CircuitAssembly;
 }
 
+function sheetSpaceNotice(response: unknown) {
+    const record = typeof response === 'object' && response !== null
+        ? response as Record<string, unknown>
+        : undefined;
+    const sheetSpace = typeof record?.sheetSpace === 'object' && record.sheetSpace !== null
+        ? record.sheetSpace as Record<string, unknown>
+        : undefined;
+    const freePercent = sheetSpace?.freePercent;
+    if (typeof freePercent !== 'number' || !Number.isFinite(freePercent)) return undefined;
+    const low = freePercent < 10;
+    return {
+        freePercent,
+        level: low ? 'warning' : 'info',
+        message: low
+            ? `${freePercent}% of the current schematic sheet remains available. Consider continuing on another sheet.`
+            : `${freePercent}% of the current schematic sheet remains available.`,
+    };
+}
+
 export function registerCircuitTools(server: McpServer, bridge: Bridge) {
     server.registerTool(
         'component_search',
@@ -86,7 +105,7 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
         'extract_circuit_on_current_page',
         {
             title: 'Extract Circuit',
-            description: `Post-process circuit changes on the main EasyEDA Copilot server and sends the assembled result to EasyEDA. Every added component must include part_uuid. For circuit modification docs, read the local docs folder: ${SKILL_DOC_PATH}`,
+            description: `Post-process circuit changes on the main EasyEDA Copilot server and sends the assembled result to EasyEDA. Every added component must include part_uuid. The result reports remaining current-sheet space and warns below 10%. For circuit modification docs, read the local docs folder: ${SKILL_DOC_PATH}`,
             inputSchema: CircuitModStruct(),
         },
         async (circuit) => {
@@ -103,8 +122,12 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
 
             const resolvedInputCircuit = await bridge.requestEasyEda('get-schematic');
             const result = await postJson('/v1/mcp-tools/extract-circuit', { circuit, inputCircuit: resolvedInputCircuit });
-            await bridge.requestEasyEda('assemble-circuit', result as Record<string, unknown>, 300000);
-            return textResult('Circuit sent to EasyEDA for assembly.');
+            const assembled = await bridge.requestEasyEda('assemble-circuit', result as Record<string, unknown>, 300000);
+            const sheetSpace = sheetSpaceNotice(assembled);
+            return textResult({
+                message: 'Circuit sent to EasyEDA for assembly.',
+                ...(sheetSpace ? { sheetSpace } : {}),
+            });
         },
     );
 
@@ -118,9 +141,11 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
                     z.string().min(1).describe('Block name.'),
                     z.array(z.string().min(1)).min(1).describe('Component designators in the block.'),
                 ).describe('All current-page components grouped by block name.'),
+                draw_block_box: z.boolean().default(false)
+                    .describe('Draw Copilot-managed boxes and labels around functional blocks.'),
             }),
         },
-        async ({ blocks }) => {
+        async ({ blocks, draw_block_box }) => {
             const inputCircuit = await bridge.requestEasyEda('get-schematic') as ExplainCircuit;
             if (!inputCircuit.components.length) throw new Error('The current schematic page has no components.');
 
@@ -184,6 +209,10 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
             assembly.rm_components = [];
             assembly.replace_components = [];
             assembly.rm_net = [];
+            assembly.assembly_options = {
+                ...assembly.assembly_options,
+                draw_blocks: draw_block_box,
+            };
 
             await bridge.requestEasyEda('beautify-current-page', {
                 circuit: assembly,

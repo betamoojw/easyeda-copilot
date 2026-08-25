@@ -1,4 +1,4 @@
-import { assembleCircuit } from './eda/assemble';
+import { assembleCircuit, deleteCopilotBlockBoxes } from './eda/assemble';
 import {
     applyRoutingCopper,
     assembleBoard,
@@ -8,6 +8,8 @@ import { checkpointer } from './eda/checkpointer';
 import { checkPcbDrc } from './eda/drc';
 import { getPcb, getPcbExistingPlacement, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
 import { getSchematic } from './eda/schematic';
+import { estimateSchematicSheetSpace } from './eda/sheet-space';
+import { withTimeout } from './eda/utils';
 import '@copilot/shared/types/eda';
 import { ExplainCircuit } from '@copilot/shared/types/circuit';
 import PQueue from 'p-queue';
@@ -1608,7 +1610,18 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
 
             await checkpointer.save(false);
             await assembleCircuit(circuit as Parameters<typeof assembleCircuit>[0]);
-            reply(true, { assembled: true });
+            const sheetSpace = await withTimeout(
+                estimateSchematicSheetSpace(),
+                5000,
+                'Schematic sheet space estimate timeout',
+            ).catch(error => {
+                eda.sys_Log.add(
+                    `Schematic sheet space estimate failed: ${(error as Error).message}`,
+                    ESYS_LogType.WARNING,
+                );
+                return undefined;
+            });
+            reply(true, { assembled: true, ...(sheetSpace ? { sheetSpace } : {}) });
             return;
         }
 
@@ -1634,6 +1647,8 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             let mutationStarted = false;
             try {
                 mutationStarted = true;
+
+                await deleteCopilotBlockBoxes();
 
                 const wireIds = await eda.sch_PrimitiveWire.getAllPrimitiveId().then(ids => [...ids]);
                 if (wireIds.length) {

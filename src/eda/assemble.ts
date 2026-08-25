@@ -13,6 +13,9 @@ import { assembleCircuitSourceTask } from "./assemble-source";
 import PQueue from 'p-queue';
 
 const assembleQueue = new PQueue({ concurrency: 1 });
+const COPILOT_BLOCK_COLOR = "#808080";
+const COPILOT_BLOCK_COLORS = new Set([COPILOT_BLOCK_COLOR]);
+const COPILOT_BLOCK_LINE_TYPE = ESCH_PrimitiveLineType.DOT_DASHED;
 
 const applyOffset = (x: number, y: number, offset: Offset) => {
 
@@ -264,17 +267,54 @@ async function drawRect(blocksRect: CircuitAssembly['blocks_rect'], offset: Offs
 
             const { x, y } = applyOffset(block.x - padding, block.y - padding, offset)
 
-            const rect = await eda.sch_PrimitiveRectangle.create(x, y, block.width + (padding * 2), block.height + (padding * 2), 2);
+            await eda.sch_PrimitiveRectangle.create(
+                x,
+                y,
+                block.width + (padding * 2),
+                block.height + (padding * 2),
+                2,
+                0,
+                COPILOT_BLOCK_COLOR,
+                "none",
+                2,
+                COPILOT_BLOCK_LINE_TYPE,
+                ESCH_PrimitiveFillStyle.NONE,
+            );
 
             const descArr = chunkArray(block.description.split(' '), 8).map(arr => arr.join(' '))
             const desc = descArr.join('\n');
 
-            const text = await eda.sch_PrimitiveText.create(x, y + 3 + (5 * descArr.length), desc, undefined, undefined, undefined, 5)
-            const text_2 = await eda.sch_PrimitiveText.create(x, y + 18 + (5 * descArr.length), block.name, undefined, undefined, undefined, 14);
+            await eda.sch_PrimitiveText.create(
+                x, y + 3 + (5 * descArr.length), desc, undefined, COPILOT_BLOCK_COLOR, undefined, 5,
+            );
+            await eda.sch_PrimitiveText.create(
+                x, y + 18 + (5 * descArr.length), block.name, undefined, COPILOT_BLOCK_COLOR, undefined, 14,
+            );
 
         } catch (error) {
             // pass
         }
+    }
+}
+
+export async function deleteCopilotBlockBoxes() {
+    const [rectangles, texts] = await Promise.all([
+        eda.sch_PrimitiveRectangle.getAll(),
+        eda.sch_PrimitiveText.getAll(),
+    ]);
+    const markedRectangles = rectangles.filter(rectangle => (
+        COPILOT_BLOCK_COLORS.has(rectangle.getState_Color()?.toUpperCase() ?? "")
+        && rectangle.getState_LineType() === COPILOT_BLOCK_LINE_TYPE
+    ));
+    const markedTexts = texts.filter(text => (
+        COPILOT_BLOCK_COLORS.has(text.getState_TextColor()?.toUpperCase() ?? "")
+    ));
+
+    if (markedRectangles.length && !await eda.sch_PrimitiveRectangle.delete(markedRectangles)) {
+        throw new Error("Failed to delete old Copilot block rectangles");
+    }
+    if (markedTexts.length && !await eda.sch_PrimitiveText.delete(markedTexts)) {
+        throw new Error("Failed to delete old Copilot block texts");
     }
 }
 
