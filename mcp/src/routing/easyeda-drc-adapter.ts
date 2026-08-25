@@ -381,6 +381,295 @@ export function mergeEasyEdaDrcIntoRoutingRules(source: PcbDrcBundle, rules: Rou
     };
 }
 
+export type CompactDrcRange = Readonly<{
+    min?: number;
+    preferred?: number;
+    max?: number;
+}>;
+
+export type CompactPhysicalDrc = Readonly<{
+    trackWidthMm?: CompactDrcRange;
+    viaDiameterMm?: CompactDrcRange;
+    viaDrillMm?: CompactDrcRange;
+    clearanceMm?: Readonly<Record<string, number>>;
+}>;
+
+export type CompactPcbDrcRules = Readonly<{
+    global: CompactPhysicalDrc;
+    netClasses?: Readonly<Record<string, CompactPhysicalDrc & Readonly<{ nets: readonly string[] }>>>;
+    differentialPairs?: Readonly<Record<string, Readonly<{
+        positive: string;
+        negative: string;
+        trackWidthMm?: CompactDrcRange;
+        gapMm?: CompactDrcRange;
+        maxSkewMm?: number;
+    }>>>;
+    equalLengthGroups?: Readonly<Record<string, CompactPhysicalDrc & Readonly<{
+        nets: readonly string[];
+        target?: string;
+        toleranceMm?: number;
+    }>>>;
+    netOverrides?: Readonly<Record<string, CompactPhysicalDrc>>;
+    warnings?: readonly string[];
+}>;
+
+function roundMm(value: number | undefined) {
+    return value === undefined || !Number.isFinite(value)
+        ? undefined
+        : Math.round((value + Number.EPSILON) * 1_000) / 1_000;
+}
+
+function compactPreset(
+    configuration: JsonRecord,
+    category: string,
+    family: string,
+    name: unknown,
+    warnings: string[],
+    path: string,
+) {
+    const presets = record(record(configuration[category])?.[family]);
+    if (!presets) {
+        warnings.push(`${path}: missing preset family ${category}.${family}`);
+        return undefined;
+    }
+    if (typeof name === 'string' && name !== 'default') {
+        const selected = record(presets[name]);
+        if (!selected) warnings.push(`${path}: missing preset ${name}`);
+        return selected;
+    }
+    return Object.values(presets).map(record).find(item => item?.isSetDefault === true)
+        ?? Object.values(presets).map(record).find(Boolean);
+}
+
+function rangeFromData(value: unknown): CompactDrcRange | undefined {
+    const data = record(record(value)?.data);
+    const entry = data && (record(data['1']) ?? Object.values(data).map(record).find(Boolean));
+    if (!entry) return undefined;
+    const output = {
+        ...(roundMm(typeof entry.minValue === 'number' ? entry.minValue : undefined) === undefined
+            ? {} : { min: roundMm(entry.minValue as number)! }),
+        ...(roundMm(typeof entry.defaultValue === 'number' ? entry.defaultValue : undefined) === undefined
+            ? {} : { preferred: roundMm(entry.defaultValue as number)! }),
+        ...(roundMm(typeof entry.maxValue === 'number' ? entry.maxValue : undefined) === undefined
+            ? {} : { max: roundMm(entry.maxValue as number)! }),
+    };
+    return Object.keys(output).length ? output : undefined;
+}
+
+function trackRange(value: unknown) {
+    return rangeFromData(record(value)?.form);
+}
+
+function viaRanges(value: unknown) {
+    const diameter = {
+        min: roundMm(nestedNumber(value, 'viaOuterdiameterMin')),
+        preferred: roundMm(nestedNumber(value, 'viaOuterdiameterDefault')),
+        max: roundMm(nestedNumber(value, 'viaOuterdiameterMax')),
+    };
+    const drill = {
+        min: roundMm(nestedNumber(value, 'viaInnerdiameterMin')),
+        preferred: roundMm(nestedNumber(value, 'viaInnerdiameterDefault')),
+        max: roundMm(nestedNumber(value, 'viaInnerdiameterMax')),
+    };
+    const compact = (range: typeof diameter): CompactDrcRange | undefined => {
+        const output = Object.fromEntries(Object.entries(range).filter(([, child]) => child !== undefined));
+        return Object.keys(output).length ? output : undefined;
+    };
+    return { diameter: compact(diameter), drill: compact(drill) };
+}
+
+function clearanceValue(value: unknown, left: string, right: string) {
+    const source = record(value);
+    const rows = Array.isArray(source?.row) ? source.row : [];
+    const columns = Array.isArray(source?.column) ? source.column : [];
+    const tables = record(source?.tables);
+    const table = tables && (record(tables['1']) ?? Object.values(tables).map(record).find(Boolean));
+    const content = Array.isArray(table?.content) ? table.content : [];
+    const at = (rowName: string, columnName: string) => {
+        const rowIndex = rows.indexOf(rowName);
+        const columnIndex = columns.indexOf(columnName);
+        const row = rowIndex >= 0 && Array.isArray(content[rowIndex]) ? content[rowIndex] : undefined;
+        const candidate = row && columnIndex >= 0 ? row[columnIndex] : undefined;
+        return roundMm(typeof candidate === 'number' ? candidate : undefined);
+    };
+    return at(left, right) ?? at(right, left);
+}
+
+function clearanceSummary(value: unknown): Readonly<Record<string, number>> | undefined {
+    const smdPad = clearanceValue(value, 'Track', 'SMD Pad');
+    const thPad = clearanceValue(value, 'Track', 'TH Pad');
+    const output: Record<string, number | undefined> = {
+        trackTrack: clearanceValue(value, 'Track', 'Track'),
+        ...(smdPad === thPad ? { trackPad: smdPad } : { trackSmdPad: smdPad, trackThPad: thPad }),
+        trackVia: clearanceValue(value, 'Track', 'Via'),
+        trackCopper: clearanceValue(value, 'Track', 'Copper/Plane Zone'),
+        trackBoard: clearanceValue(value, 'Track', 'Board Outline'),
+        trackHole: clearanceValue(value, 'Track', 'Hole'),
+    };
+    const compact = Object.fromEntries(Object.entries(output).filter(([, child]) => child !== undefined)) as Record<string, number>;
+    return Object.keys(compact).length ? compact : undefined;
+}
+
+function globalPhysicalDrc(configuration: JsonRecord, warnings: string[]): CompactPhysicalDrc {
+    const track = compactPreset(configuration, 'Physics', 'Track', undefined, warnings, 'global.Track');
+    const via = compactPreset(configuration, 'Physics', 'Via Size', undefined, warnings, 'global.Via Size');
+    const spacing = compactPreset(configuration, 'Spacing', 'Safe Spacing', undefined, warnings, 'global.Safe Spacing');
+    const viaSummary = viaRanges(via);
+    return {
+        ...(trackRange(track) ? { trackWidthMm: trackRange(track) } : {}),
+        ...(viaSummary.diameter ? { viaDiameterMm: viaSummary.diameter } : {}),
+        ...(viaSummary.drill ? { viaDrillMm: viaSummary.drill } : {}),
+        ...(clearanceSummary(spacing) ? { clearanceMm: clearanceSummary(spacing) } : {}),
+    };
+}
+
+function effectivePhysicalDrc(
+    configuration: JsonRecord,
+    rule: PcbDrcNetRuleEntry,
+    fallback: CompactPhysicalDrc,
+    warnings: string[],
+    path: string,
+): CompactPhysicalDrc {
+    const track = typeof rule.Track === 'string'
+        ? compactPreset(configuration, 'Physics', 'Track', rule.Track, warnings, `${path}.Track`)
+        : undefined;
+    const via = typeof rule['Via Size'] === 'string'
+        ? compactPreset(configuration, 'Physics', 'Via Size', rule['Via Size'], warnings, `${path}.Via Size`)
+        : undefined;
+    const spacing = typeof rule['Safe Spacing'] === 'string'
+        ? compactPreset(configuration, 'Spacing', 'Safe Spacing', rule['Safe Spacing'], warnings, `${path}.Safe Spacing`)
+        : undefined;
+    const viaSummary = viaRanges(via);
+    return {
+        trackWidthMm: trackRange(track) ?? fallback.trackWidthMm,
+        viaDiameterMm: viaSummary.diameter ?? fallback.viaDiameterMm,
+        viaDrillMm: viaSummary.drill ?? fallback.viaDrillMm,
+        clearanceMm: clearanceSummary(spacing) ?? fallback.clearanceMm,
+    };
+}
+
+function physicalDifference(base: CompactPhysicalDrc, target: CompactPhysicalDrc): CompactPhysicalDrc {
+    const changed = <T>(left: T, right: T) => JSON.stringify(left) !== JSON.stringify(right);
+    return {
+        ...(changed(base.trackWidthMm, target.trackWidthMm) ? { trackWidthMm: target.trackWidthMm } : {}),
+        ...(changed(base.viaDiameterMm, target.viaDiameterMm) ? { viaDiameterMm: target.viaDiameterMm } : {}),
+        ...(changed(base.viaDrillMm, target.viaDrillMm) ? { viaDrillMm: target.viaDrillMm } : {}),
+        ...(changed(base.clearanceMm, target.clearanceMm) ? { clearanceMm: target.clearanceMm } : {}),
+    };
+}
+
+function hasPhysicalDrc(value: CompactPhysicalDrc) {
+    return Object.values(value).some(child => child !== undefined);
+}
+
+/** Compact routing-relevant projection of the native EasyEDA DRC bundle. */
+export function summarizeEasyEdaDrcBundle(source: PcbDrcBundle): CompactPcbDrcRules {
+    const warnings: string[] = [];
+    const global = globalPhysicalDrc(source.ruleConfiguration, warnings);
+    const netOverrides: Record<string, CompactPhysicalDrc> = {};
+    const addNetOverride = (net: string, value: CompactPhysicalDrc) => {
+        if (!hasPhysicalDrc(value)) return;
+        netOverrides[net] = { ...netOverrides[net], ...value };
+    };
+
+    const netClasses: Record<string, CompactPhysicalDrc & { nets: readonly string[] }> = {};
+    const classPhysicalByNet = new Map<string, CompactPhysicalDrc>();
+    for (const rule of source.netRules) if (rule.type === 'netClass') {
+        const effective = effectivePhysicalDrc(source.ruleConfiguration, rule, global, warnings, `netClasses.${rule.name}`);
+        netClasses[rule.name] = { nets: rule.sub.map(member => member.name), ...physicalDifference(global, effective) };
+        for (const member of rule.sub) {
+            classPhysicalByNet.set(member.name, effective);
+            const memberEffective = effectivePhysicalDrc(
+                source.ruleConfiguration, member, effective, warnings, `netClasses.${rule.name}.${member.name}`,
+            );
+            addNetOverride(member.name, physicalDifference(effective, memberEffective));
+        }
+    }
+
+    const differentialPairs: Record<string, {
+        positive: string;
+        negative: string;
+        trackWidthMm?: CompactDrcRange;
+        gapMm?: CompactDrcRange;
+        maxSkewMm?: number;
+    }> = {};
+    for (const rule of source.netRules) if (rule.type === 'differentialPair') {
+        const presetNames = [...new Set([rule.positiveNet, rule.negativeNet]
+            .flatMap(net => netOccurrences(source.netRules, net))
+            .map(member => member['Differential Pair'])
+            .filter((name): name is string => typeof name === 'string'))];
+        if (presetNames.length > 1) warnings.push(`differentialPairs.${rule.name}: members use different presets`);
+        const selected = presetNames.length
+            ? compactPreset(
+                source.ruleConfiguration, 'Physics', 'Differential Pair', presetNames[0], warnings,
+                `differentialPairs.${rule.name}`,
+            )
+            : undefined;
+        const form = record(selected?.form);
+        const width = rangeFromData(form?.strokeWidthTables);
+        const gap = rangeFromData(form?.diffPairSpacingTables);
+        const maxSkewMm = roundMm(nestedNumber(selected, 'differentailPairLenTolerMax'));
+        differentialPairs[rule.name] = {
+            positive: rule.positiveNet,
+            negative: rule.negativeNet,
+            ...(width ? { trackWidthMm: width } : {}),
+            ...(gap ? { gapMm: gap } : {}),
+            ...(maxSkewMm === undefined ? {} : { maxSkewMm }),
+        };
+    }
+
+    const equalLengthGroups: Record<string, CompactPhysicalDrc & {
+        nets: readonly string[];
+        target?: string;
+        toleranceMm?: number;
+    }> = {};
+    for (const rule of source.netRules) if (rule.type === 'equalLengthGroup') {
+        const effective = effectivePhysicalDrc(source.ruleConfiguration, rule, global, warnings, `equalLengthGroups.${rule.name}`);
+        const groupPhysicalOverrides = physicalDifference(global, effective);
+        const toleranceName = typeof rule['Net Length Tolerance'] === 'string'
+            ? rule['Net Length Tolerance']
+            : rule.sub.map(member => member['Net Length Tolerance'])
+                .find((name): name is string => typeof name === 'string');
+        const tolerancePreset = toleranceName === undefined
+            ? undefined
+            : compactPreset(
+                source.ruleConfiguration, 'Physics', 'Net Length Tolerance', toleranceName, warnings,
+                `equalLengthGroups.${rule.name}.Net Length Tolerance`,
+            );
+        const toleranceMm = roundMm(nestedNumber(tolerancePreset, 'netLengthTolerance'));
+        const target = typeof rule.targetNet === 'string' && rule.targetNet
+            ? rule.targetNet
+            : rule.sub.map(member => member.targetNet).find((name): name is string => typeof name === 'string' && Boolean(name));
+        equalLengthGroups[rule.name] = {
+            nets: rule.sub.map(member => member.name),
+            ...(target ? { target } : {}),
+            ...(toleranceMm === undefined ? {} : { toleranceMm }),
+            ...groupPhysicalOverrides,
+        };
+        for (const member of rule.sub) {
+            const memberBase = { ...(classPhysicalByNet.get(member.name) ?? global), ...groupPhysicalOverrides };
+            const memberEffective = effectivePhysicalDrc(
+                source.ruleConfiguration, member, memberBase, warnings, `equalLengthGroups.${rule.name}.${member.name}`,
+            );
+            addNetOverride(member.name, physicalDifference(memberBase, memberEffective));
+        }
+    }
+
+    for (const rule of source.netRules) if (rule.type === 'net') {
+        const effective = effectivePhysicalDrc(source.ruleConfiguration, rule, global, warnings, `netOverrides.${rule.name}`);
+        addNetOverride(rule.name, physicalDifference(global, effective));
+    }
+
+    return {
+        global,
+        ...(Object.keys(netClasses).length ? { netClasses } : {}),
+        ...(Object.keys(differentialPairs).length ? { differentialPairs } : {}),
+        ...(Object.keys(equalLengthGroups).length ? { equalLengthGroups } : {}),
+        ...(Object.keys(netOverrides).length ? { netOverrides } : {}),
+        ...(warnings.length ? { warnings: [...new Set(warnings)] } : {}),
+    };
+}
+
 function updateDefaultPhysicalPresets(configuration: JsonRecord, values: RoutingRuleValues) {
     const track = preset(configuration, 'Physics', 'Track', undefined);
     const formData = record(record(track?.form)?.data);

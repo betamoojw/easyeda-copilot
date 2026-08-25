@@ -243,6 +243,22 @@ assert.equal(
     'a changed global rule must update the native default Safe Spacing preset',
 );
 
+const compactDrc = drcAdapter.summarizeEasyEdaDrcBundle(translated);
+assert.deepEqual(compactDrc.global.trackWidthMm, { min: 0.2, preferred: 0.3, max: 0.3 });
+assert.deepEqual(compactDrc.global.viaDiameterMm, { min: 0.6, preferred: 0.7, max: 0.7 });
+assert.deepEqual(compactDrc.netClasses.FAST.nets, ['SIG', 'SIG_N']);
+assert.deepEqual(
+    { positive: compactDrc.differentialPairs.pair.positive, negative: compactDrc.differentialPairs.pair.negative },
+    { positive: 'SIG', negative: 'SIG_N' },
+);
+assert.deepEqual(compactDrc.equalLengthGroups.MATCHED.nets, ['MATCH_A', 'MATCH_B']);
+assert.equal(compactDrc.equalLengthGroups.MATCHED.toleranceMm, 0.15);
+const compactDrcJson = JSON.stringify(compactDrc);
+assert.equal(compactDrcJson.includes('ruleConfiguration'), false);
+assert.equal(compactDrcJson.includes('copilot_router_'), false);
+assert.equal(compactDrcJson.includes('editName'), false);
+assert.equal(compactDrcJson.includes('color'), false);
+
 const deletedRelations = drcAdapter.routingRulesToEasyEdaDrcBundle(
     translated,
     targetRoutingRules,

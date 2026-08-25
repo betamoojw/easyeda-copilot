@@ -1221,6 +1221,11 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             return;
         }
 
+        if (message.event === 'get-pcb-drc-rules') {
+            reply(true, await exportPcbDrcRules());
+            return;
+        }
+
         if (message.event === 'export-routing-input') {
             const file = await eda.pcb_ManufactureData.getAutoRouteJsonFile('Copilot_Routing_Input');
             if (!file) throw new Error('EasyEDA returned empty autoroute JSON file');

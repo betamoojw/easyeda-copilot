@@ -1,9 +1,24 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
 import * as z from 'zod/v4';
+import { PcbDrcBundleSchema } from '@copilot/shared/types/pcb/drc.js';
 import { Bridge } from "../bridge";
+import { summarizeEasyEdaDrcBundle } from '../routing/easyeda-drc-adapter';
 import { textResult } from "../utils/tool-result";
 
 export function registerDrcTools(server: McpServer, bridge: Bridge) {
+    server.registerTool(
+        'get_pcb_drc_rules',
+        {
+            title: 'Get PCB DRC Rules',
+            description: 'Return a compact routing-relevant view of the current EasyEDA PCB DRC rules: global limits, net classes, differential pairs, equal-length groups, and explicit net overrides. Open the target PCB document first.',
+            inputSchema: z.object({}),
+        },
+        async () => {
+            const bundle = PcbDrcBundleSchema().parse(await bridge.requestEasyEda('get-pcb-drc-rules'));
+            return textResult(summarizeEasyEdaDrcBundle(bundle));
+        },
+    );
+
     server.registerTool(
         'check_pcb_drc',
         {
