@@ -9,6 +9,7 @@ const DEFAULT_POUR_LINE_WIDTH_MM = 0.15;
 const MIN_COPPER_WIDTH_MM = 0.01;
 const SAME_POINT_EPS = 1e-9;
 const PCB_CLEAR_TIMEOUT_MS = 5000;
+const COPILOT_PAD_PREFIX = "copilot_";
 const VIA_SOLDER_MASK_EXPANSION: IPCB_PrimitiveSolderMaskAndPasteMaskExpansion = {
     topSolderMask: 0,
     bottomSolderMask: 0,
@@ -631,12 +632,32 @@ async function createBoardPad(pad: BoardPad, name: string, layer: TPCB_LayersOfP
     ).catch(e => undefined);
 }
 
+async function deleteOldBoardPads() {
+    const existing = await eda.pcb_PrimitivePad.getAll().catch(error => {
+        throw new Error(`Failed to read existing PCB pads: ${(error as Error).message}`);
+    });
+    const copilotPads = existing.filter(pad => (
+        typeof (pad as IPCB_PrimitivePad & {
+            getState_ParentComponentPrimitiveId?: () => string;
+        }).getState_ParentComponentPrimitiveId !== "function"
+        && pad.getState_PadNumber().startsWith(COPILOT_PAD_PREFIX)
+    ));
+
+    if (!copilotPads.length) return;
+
+    const deleted = await eda.pcb_PrimitivePad.delete(copilotPads);
+    if (!deleted) throw new Error("Failed to delete existing Copilot PCB pads");
+
+    eda.sys_Log.add(`PCB old Copilot pads deleted: ${copilotPads.length}`, ESYS_LogType.INFO);
+}
+
 async function drawPads(pads: BoardAssemble["pads"]) {
+    await deleteOldBoardPads();
     if (!pads?.length) return;
 
     for (let i = 0; i < pads.length; i++) {
         const pad = pads[i];
-        const name = safePrimitiveName(pad.name.trim() || `P${i + 1}`);
+        const name = safePrimitiveName(COPILOT_PAD_PREFIX, pad.name.trim() || `P${i + 1}`);
         const hole = boardPadHole(pad);
         const layers = boardPadLayers(pad);
 
