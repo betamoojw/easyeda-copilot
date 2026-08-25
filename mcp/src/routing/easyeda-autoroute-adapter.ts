@@ -444,11 +444,10 @@ export function importEasyEdaAutorouteJson(
     const zones = importedZones(root, layerNames, diagnostics);
     for (const zone of zones) if (zone.net) netNames.add(zone.net);
     const importedCopper: RoutingCopper = { tracks: importedTracks, vias: importedVias, zones };
-    const selectedForClear = (net: string | undefined, item: RoutingClearIntent['items'][number]) => (
-        net !== undefined
-        && Boolean(options.clearRouting?.items.includes(item))
-        && (options.clearRouting?.nets === 'all' || options.clearRouting?.nets.includes(net))
-    );
+    const selectedForClear = (net: string | undefined, item: keyof RoutingClearIntent) => {
+        const nets = options.clearRouting?.[item];
+        return net !== undefined && (nets === 'all' || Boolean(nets?.includes(net)));
+    };
     const editable: RoutingCopper = {
         tracks: importedCopper.tracks.filter(item => selectedForClear(item.net, 'tracks')),
         vias: importedCopper.vias.filter(item => selectedForClear(item.net, 'vias')),

@@ -84,18 +84,35 @@ assert.equal(
 );
 
 const rerouteImport = adapter.importEasyEdaAutorouteJson(fixture, {
-    clearRouting: { nets: ['SIG'], items: ['tracks'] },
+    clearRouting: { tracks: ['SIG'] },
 });
 assert.ok(rerouteImport.board, JSON.stringify(rerouteImport.diagnostics));
 assert.equal(rerouteImport.board.copper.editable.tracks.length, 1);
 assert.equal(rerouteImport.board.copper.fixed.tracks.length, 0);
+
+const independentClearFixture = structuredClone(fixture);
+independentClearFixture.tracks.push({
+    id: 'old_n', net: 'SIG_N', layer: 1, width: 0.2, path: [[-2, 0], [-1, 0]],
+});
+independentClearFixture.fillRegions = [
+    { id: 'sig_zone', net: 'SIG', layer: 1, path: [[-4, -4], [-3, -4], [-3, -3], [-4, -3]] },
+    { id: 'sig_n_zone', net: 'SIG_N', layer: 1, path: [[3, 3], [4, 3], [4, 4], [3, 4]] },
+];
+const independentClearImport = adapter.importEasyEdaAutorouteJson(independentClearFixture, {
+    clearRouting: { tracks: ['SIG'], zones: ['SIG_N'] },
+});
+assert.ok(independentClearImport.board, JSON.stringify(independentClearImport.diagnostics));
+assert.deepEqual(independentClearImport.board.copper.editable.tracks.map(item => item.net), ['SIG']);
+assert.deepEqual(independentClearImport.board.copper.fixed.tracks.map(item => item.net), ['SIG_N']);
+assert.deepEqual(independentClearImport.board.copper.editable.zones.map(item => item.net), ['SIG_N']);
+assert.deepEqual(independentClearImport.board.copper.fixed.zones.map(item => item.net), ['SIG']);
 
 const copperOnly = await router.run({
     board: rerouteImport.board,
     dsl: `clearRouting({ nets: ["SIG"], items: ["tracks"] }); runCopper();`,
 });
 assert.equal(copperOnly.status, 'complete');
-assert.deepEqual(copperOnly.clearRouting, { nets: ['SIG'], items: ['tracks'] });
+assert.deepEqual(copperOnly.clearRouting, { tracks: ['SIG'] });
 assert.equal(copperOnly.copper.tracks.length, 0);
 
 const application = adapter.routingResultToEasyEdaApplication({

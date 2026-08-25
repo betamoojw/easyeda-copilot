@@ -281,21 +281,22 @@ function readRoutingApplication(value: unknown): RoutingCopperApplication {
     let clearRouting: RoutingCopperApplication['clearRouting'];
     if (value.clearRouting !== undefined) {
         if (!isRecord(value.clearRouting)) throw new Error('Invalid clearRouting payload.');
-        const rawItems = Array.isArray(value.clearRouting.items) ? value.clearRouting.items : [];
-        const items = rawItems
-            .filter((item): item is 'tracks' | 'vias' | 'zones' => (
-                item === 'tracks' || item === 'vias' || item === 'zones'
-            ));
-        if (!items.length || items.length !== rawItems.length) {
-            throw new Error('Invalid clearRouting items.');
+        const scopes: NonNullable<RoutingCopperApplication['clearRouting']> = {};
+        for (const item of ['tracks', 'vias', 'zones'] as const) {
+            const rawNets = value.clearRouting[item];
+            if (rawNets === undefined) continue;
+            const nets = rawNets === 'all'
+                ? 'all' as const
+                : Array.isArray(rawNets)
+                    ? rawNets.map((net, index) => routingString(net, `clearRouting.${item}[${index}]`))
+                    : undefined;
+            if (!nets || (Array.isArray(nets) && !nets.length)) {
+                throw new Error(`Invalid clearRouting ${item} scope.`);
+            }
+            scopes[item] = nets;
         }
-        const nets = value.clearRouting.nets === 'all'
-            ? 'all' as const
-            : Array.isArray(value.clearRouting.nets)
-                ? value.clearRouting.nets.map((net, index) => routingString(net, `clearRouting.nets[${index}]`))
-                : undefined;
-        if (!nets || (Array.isArray(nets) && !nets.length)) throw new Error('Invalid clearRouting nets.');
-        clearRouting = { nets, items };
+        if (!Object.keys(scopes).length) throw new Error('Invalid empty clearRouting payload.');
+        clearRouting = scopes;
     }
     const copperLayerCount = value.copperLayerCount === undefined
         ? undefined
@@ -359,6 +360,27 @@ function asNetRuleEntries(value: unknown): PcbDrcNetRuleEntry[] {
         }
     }
     return structuredClone(value) as PcbDrcNetRuleEntry[];
+}
+
+async function exportRoutingInput() {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            const file = await eda.pcb_ManufactureData.getAutoRouteJsonFile('Copilot_Routing_Input');
+            const text = file ? await file.text() : '';
+            if (file && text.trim()) return { file, text };
+            lastError = new Error('EasyEDA returned empty autoroute JSON file');
+        } catch (error) {
+            lastError = error;
+        }
+        if (attempt < 2) {
+            await eda.pcb_Document.startCalculatingRatline().catch(() => false);
+            await delay(150 * (attempt + 1));
+        }
+    }
+    throw new Error(
+        `EasyEDA returned empty autoroute JSON file after 3 attempts${lastError instanceof Error ? `: ${lastError.message}` : ''}`,
+    );
 }
 
 function netRuleTemplate(netRules: readonly PcbDrcNetRuleEntry[], name: string): PcbDrcNetRule {
@@ -1227,13 +1249,12 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
         }
 
         if (message.event === 'export-routing-input') {
-            const file = await eda.pcb_ManufactureData.getAutoRouteJsonFile('Copilot_Routing_Input');
-            if (!file) throw new Error('EasyEDA returned empty autoroute JSON file');
+            const { file, text } = await exportRoutingInput();
             reply(true, {
                 name: file.name,
                 size: file.size,
                 type: file.type,
-                text: await file.text(),
+                text,
                 drc: await exportPcbDrcRules(),
             });
             return;

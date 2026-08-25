@@ -692,8 +692,9 @@ async function drawPolygons(polygons: BoardAssemble["polygons"]) {
 export type RoutingCopperApplication = {
     copperLayerCount?: number;
     clearRouting?: {
-        nets: 'all' | string[];
-        items: Array<'tracks' | 'vias' | 'zones'>;
+        tracks?: 'all' | string[];
+        vias?: 'all' | string[];
+        zones?: 'all' | string[];
     };
     tracks: Array<{
         id?: string;
@@ -904,14 +905,20 @@ export async function applyRoutingCopper(application: RoutingCopperApplication) 
         if (!activeLayers.has(layer)) throw new Error(`Routing result targets inactive copper layer: ${layer}`);
     }
 
-    const cleared = application.clearRouting ? await routingApplicationStep('copper cleanup', () => clearCurrentPcbBoard({
-        preserveBoardOutline: true,
-        strict: true,
-        items: [...application.clearRouting.items],
-        ...(application.clearRouting.nets === 'all'
-            ? {}
-            : { clearOnlyNet: [...application.clearRouting.nets] }),
-    })) : undefined;
+    const cleared = application.clearRouting ? await routingApplicationStep('copper cleanup', async () => {
+        const results: ClearPcbBoardResult[] = [];
+        for (const item of ['tracks', 'vias', 'zones'] as const) {
+            const nets = application.clearRouting?.[item];
+            if (!nets) continue;
+            results.push(await clearCurrentPcbBoard({
+                preserveBoardOutline: true,
+                strict: true,
+                items: [item],
+                ...(nets === 'all' ? {} : { clearOnlyNet: [...nets] }),
+            }));
+        }
+        return results;
+    }) : undefined;
     await routingApplicationStep('track creation', () => drawRoutingTracks(application.tracks));
     await routingApplicationStep('via creation', () => drawRoutingVias(application.vias));
     const pendingZones = await routingApplicationStep('zone creation', () => drawRoutingZones(application.zones));
