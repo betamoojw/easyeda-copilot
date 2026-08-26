@@ -46,18 +46,21 @@ Assembly preserves existing copper and board objects. It replaces the existing o
 - Keep an IC with the local parts that make its stage work; do not group by component type.
 - Do not mix top and bottom components in one block.
 - Use modules as soft macro groups; do not put distant edge connectors into one sparse module.
-- Use a few hard `criticalPair` constraints only for dominant pad-to-pad paths.
-- Use one `signalPath` for an ordered chain through series components. Adjacent segments must enter and leave the shared component through different pins. It guides placement only; it does not create copper or impedance rules.
+- Use `criticalPair` for one isolated dominant pad-to-pad hop that is not part of a longer declared path.
+- Use `corePairs` for several independent dominant pairs inside one block, not for the consecutive segments of a signal chain.
+- Use `signalPath` only for a physically critical ordered chain, especially RF or high-speed signals through series matching, filtering, or termination parts. It is self-contained: do not repeat its segments with `criticalPair` or `corePairs`, because overlapping attraction rules can over-constrain the placer.
+- Do not use `signalPath` for ordinary control/digital nets, a single isolated hop, or every connection on the board. It guides placement only; routing and impedance intent remain separate.
 - Use `capCluster` for two or more capacitors sharing supply and return; use `bypass`, `veryNear`, or `criticalPair` for a single capacitor.
 - Use `fixed` only for a true mechanical coordinate.
 - Use `constraintRegion` for placement exclusion; it is not a copper keepout.
 
-Example for connector -> series resistor -> IC:
+Example for one critical RF chain:
 
 ```js
-signalPath("USB_D+", [
-  [pin("J1", "A6"), pin("R1", "1")],
-  [pin("R1", "2"), pin("U1", "20")],
+signalPath("RF_ANT", [
+  [pin("J1", "1"), pin("L1", "1")],
+  [pin("L1", "2"), pin("C1", "1")],
+  [pin("C1", "2"), pin("U1", "ANT")],
 ]);
 ```
 

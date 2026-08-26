@@ -341,13 +341,13 @@ interface ComponentBuilder {
   bottom(): ComponentBuilder;
   /** Allowed rotations in degrees. Avoid calling rotations() unless orientation is explicitly required or mechanically constrained. */
   rotations(...rotations: number[]): ComponentBuilder;
-  /** Declare where the mechanical face/port/opening points at rotate=0. If omitted and faceTo() is used, runtime auto-detects from footprint pads and reports a warning. */
+  /** Fallback override for incorrect mechanical-face auto-detection. Do not call by default; add it only when preview or diagnostics show that the inferred rotate=0 face is wrong. */
   faceAt0(direction: MechanicalFaceDirection): ComponentBuilder;
   /** Hard-constrain rotation so the component's mechanical face points to this board direction. Use for USB/connectors/buttons/displays. */
   faceTo(direction: MechanicalFaceDirection): ComponentBuilder;
   /** Mount a mechanical component on a board edge. Computes fixed center, face direction, and board overflow from the real footprint bbox after rotation. Prefer this for USB/ports/buttons on edges instead of fixed()+offset+boardOverflow. */
   edgeMount(edge: BoardEdge, options?: EdgeMountOptions): ComponentBuilder;
-  /** Place a mechanical component near one or more board edges while keeping it inside the board. Use for buttons/LEDs/side controls. If face auto-detection is wrong, call faceAt0(...) before this. */
+  /** Place a mechanical component near one or more board edges while keeping it inside the board. Use for buttons/LEDs/side controls. Runtime normally detects the mechanical face; use faceAt0(...) only to correct a verified wrong inference. */
   edgePlace(edgeOrEdges: BoardEdge | BoardEdge[], options?: EdgePlaceOptions): ComponentBuilder;
   /** Lock this component to an exact board position. Allowed only for role("connector") mechanical parts; normal components must be placed by blocks/hints. */
   fixed(options: FixedPlacementOptions): ComponentBuilder;
@@ -471,11 +471,11 @@ interface CoreIslandOptions extends CriticalPairOptions {
   pairs?: Array<[PinTargetRef, PinTargetRef]>;
 }
 
-/** Dominant pad-to-pad constraint for short critical electrical paths such as buck switch-node-to-inductor or RF matching pairs. Prefer one hard dominant pair plus soft secondary pairs. */
+/** One isolated dominant pad-to-pad constraint, such as buck switch-node-to-inductor. Do not duplicate a segment already covered by signalPath(). */
 declare function criticalPair(source: PinTargetRef, target: PinTargetRef, options?: CriticalPairOptions): void;
-/** Describe one ordered physical signal path across series components or functional blocks. Each tuple is one routable pad-to-pad segment; adjacent tuples must meet on the same through-component using different entry/exit pins. This is placement intent only and does not create copper or guarantee impedance. */
+/** Self-contained placement constraint for one critical ordered signal chain, especially an RF or high-speed path through series matching/filter parts. Each tuple is one pad-to-pad segment; adjacent tuples meet on the same pass-through component using different entry/exit pins. Use only when physical path order matters. Do not duplicate its segments with criticalPair() or corePairs(). This does not create copper or guarantee impedance. */
 declare function signalPath(name: string, segments: SignalPathSegment[], options?: SignalPathOptions): void;
-/** Bulk helper for the dominant pairs inside a functional block. Emits criticalPair() rules with stronger defaults. */
+/** Bulk helper for several independent dominant pairs inside a functional block. Do not include pairs already covered by signalPath(). */
 declare function corePairs(blockName: string, pairs: Array<[PinTargetRef, PinTargetRef]>, options?: CriticalPairOptions): void;
 /** Define a critical placement island whose internal pair geometry is packed before normal block/component placement. Does not reassign components to blocks. Use for 2-3 dominant components; avoid several islands sharing the same main IC. */
 declare function coreIsland(name: string, components: string[], options?: CoreIslandOptions): void;

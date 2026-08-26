@@ -19,7 +19,7 @@ Do not assume every connector belongs on an edge. Vertical headers, internal FFC
 - Prefer `edgePlace` for a connector or control that remains inside near an edge. It can slide to a valid nearby position around other components.
 - Use `edgeMount` when the component belongs on an edge and its real footprint geometry determines center, facing, and overflow. USB, AUX, RJ45, barrel jacks, and side-entry card slots commonly need it.
 - Use `fixed` only when an enclosure or mechanical drawing specifies an exact coordinate.
-- Use `face: "outward"` for directional external interfaces. If automatic face detection is wrong or uncertain, declare `faceAt0(...)` first.
+- Use `face: "outward"` for directional external interfaces. Do not add `faceAt0(...)` by default: `edgePlace`, `edgeMount`, and `faceTo` normally infer the face. Add it only after preview or diagnostics show that the inferred direction is wrong.
 
 There is no universal inset or overhang. Derive it from the footprint, mating opening, neighboring components, and enclosure access. Around `0.5 mm` is only a common inside-edge recommendation; compact boards may need less.
 
