@@ -8,6 +8,8 @@ export type PcbDrcPresetName = string | null;
 export type PcbDrcRuleAssignments = {
     Track?: PcbDrcPresetName;
     "Safe Spacing"?: PcbDrcPresetName;
+    "Copper Safe Spacing"?: PcbDrcPresetName;
+    "Plane Safe Spacing"?: PcbDrcPresetName;
     "Via Size"?: PcbDrcPresetName;
     "Differential Pair"?: PcbDrcPresetName;
     "Net Length Range"?: PcbDrcPresetName;
@@ -63,6 +65,8 @@ export const PcbDrcRuleObjectSchema = () => z.record(z.string(), z.unknown());
 const PcbDrcRuleAssignmentsSchema = {
     Track: z.string().nullable().optional(),
     "Safe Spacing": z.string().nullable().optional(),
+    "Copper Safe Spacing": z.string().nullable().optional(),
+    "Plane Safe Spacing": z.string().nullable().optional(),
     "Via Size": z.string().nullable().optional(),
     "Differential Pair": z.string().nullable().optional(),
     "Net Length Range": z.string().nullable().optional(),

@@ -260,6 +260,13 @@ function routingString(value: unknown, path: string) {
     return value.trim();
 }
 
+function routingEnum<T extends string>(value: unknown, allowed: readonly T[], path: string): T {
+    if (typeof value !== 'string' || !allowed.includes(value as T)) {
+        throw new Error(`Invalid routing application enum: ${path}`);
+    }
+    return value as T;
+}
+
 function routingPoint(value: unknown, path: string) {
     if (!Array.isArray(value) || value.length < 2) {
         throw new Error(`Invalid routing application point: ${path}`);
@@ -308,6 +315,79 @@ function readRoutingApplication(value: unknown): RoutingCopperApplication {
         const layers = (Array.isArray(candidate.layers) ? candidate.layers : [])
             .map((layer, layerIndex) => routingNumber(layer, `zones[${index}].layers[${layerIndex}]`));
         if (!layers.length) throw new Error(`Routing zone has no layers: ${index}`);
+
+        let fill: RoutingCopperApplication['zones'][number]['fill'];
+        if (candidate.fill !== undefined) {
+            if (!isRecord(candidate.fill)) throw new Error(`Invalid routing zone fill: ${index}`);
+            fill = {
+                style: routingEnum(candidate.fill.style, ['solid', 'hatched'] as const, `zones[${index}].fill.style`),
+                ...(candidate.fill.hatchThicknessMm === undefined ? {} : {
+                    hatchThicknessMm: routingNumber(
+                        candidate.fill.hatchThicknessMm,
+                        `zones[${index}].fill.hatchThicknessMm`,
+                        true,
+                    ),
+                }),
+                ...(candidate.fill.hatchGapMm === undefined ? {} : {
+                    hatchGapMm: routingNumber(candidate.fill.hatchGapMm, `zones[${index}].fill.hatchGapMm`, true),
+                }),
+                ...(candidate.fill.hatchOrientationDeg === undefined ? {} : {
+                    hatchOrientationDeg: routingNumber(
+                        candidate.fill.hatchOrientationDeg,
+                        `zones[${index}].fill.hatchOrientationDeg`,
+                    ),
+                }),
+            };
+        }
+
+        let padConnection: RoutingCopperApplication['zones'][number]['padConnection'];
+        if (candidate.padConnection !== undefined) {
+            if (!isRecord(candidate.padConnection)) {
+                throw new Error(`Invalid routing zone padConnection: ${index}`);
+            }
+            padConnection = {
+                mode: routingEnum(
+                    candidate.padConnection.mode,
+                    ['solid', 'thermal', 'none'] as const,
+                    `zones[${index}].padConnection.mode`,
+                ),
+                ...(candidate.padConnection.thermalGapMm === undefined ? {} : {
+                    thermalGapMm: routingNumber(
+                        candidate.padConnection.thermalGapMm,
+                        `zones[${index}].padConnection.thermalGapMm`,
+                        true,
+                    ),
+                }),
+                ...(candidate.padConnection.spokeWidthMm === undefined ? {} : {
+                    spokeWidthMm: routingNumber(
+                        candidate.padConnection.spokeWidthMm,
+                        `zones[${index}].padConnection.spokeWidthMm`,
+                        true,
+                    ),
+                }),
+                ...(candidate.padConnection.spokeCount === undefined ? {} : {
+                    spokeCount: routingNumber(
+                        candidate.padConnection.spokeCount,
+                        `zones[${index}].padConnection.spokeCount`,
+                        true,
+                    ),
+                }),
+                ...(candidate.padConnection.spokeAngleDeg === undefined ? {} : {
+                    spokeAngleDeg: routingNumber(
+                        candidate.padConnection.spokeAngleDeg,
+                        `zones[${index}].padConnection.spokeAngleDeg`,
+                    ),
+                }),
+            };
+        }
+
+        const removeIslandsBelowMm2 = candidate.removeIslandsBelowMm2 === undefined
+            ? undefined
+            : routingNumber(candidate.removeIslandsBelowMm2, `zones[${index}].removeIslandsBelowMm2`);
+        if (removeIslandsBelowMm2 !== undefined && removeIslandsBelowMm2 < 0) {
+            throw new Error(`Invalid routing zone island threshold: ${index}`);
+        }
+
         return {
             ...(typeof candidate.id === 'string' ? { id: candidate.id } : {}),
             net: routingString(candidate.net, `zones[${index}].net`),
@@ -319,6 +399,19 @@ function readRoutingApplication(value: unknown): RoutingCopperApplication {
             ...(typeof candidate.minThicknessMm === 'number'
                 ? { minThicknessMm: routingNumber(candidate.minThicknessMm, `zones[${index}].minThicknessMm`, true) }
                 : {}),
+            ...(candidate.clearanceMm === undefined ? {} : {
+                clearanceMm: routingNumber(candidate.clearanceMm, `zones[${index}].clearanceMm`, true),
+            }),
+            ...(candidate.connection === undefined ? {} : {
+                connection: routingEnum(
+                    candidate.connection,
+                    ['solid', 'thermal', 'none'] as const,
+                    `zones[${index}].connection`,
+                ),
+            }),
+            ...(fill ? { fill } : {}),
+            ...(padConnection ? { padConnection } : {}),
+            ...(removeIslandsBelowMm2 === undefined ? {} : { removeIslandsBelowMm2 }),
         };
     });
 
@@ -394,6 +487,7 @@ type DesiredNamedNetGroup = { name: string; nets: string[]; };
 
 const GENERATED_PRESET_FIELDS = [
     'Track', 'Via Size', 'Safe Spacing', 'Differential Pair', 'Net Length Tolerance',
+    'Copper Zone', 'Copper Safe Spacing',
 ] as const;
 
 function asNetRuleEntries(value: unknown): PcbDrcNetRuleEntry[] {

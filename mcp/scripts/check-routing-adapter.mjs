@@ -115,19 +115,60 @@ assert.equal(copperOnly.status, 'complete');
 assert.deepEqual(copperOnly.clearRouting, { tracks: ['SIG'] });
 assert.equal(copperOnly.copper.tracks.length, 0);
 
+const plannedZone = await router.run({
+    board: imported.board,
+    dsl: `plane({
+        net: "SIG", layers: "TOP",
+        zone: {
+            clearanceMm: 0.24,
+            minThicknessMm: 0.18,
+            fill: { style: "solid" },
+            padConnection: {
+                mode: "thermal", thermalGapMm: 0.26, spokeWidthMm: 0.31, spokeAngleDeg: 90
+            },
+            removeIslandsBelowMm2: 0
+        }
+    }); runCopper();`,
+});
+assert.equal(plannedZone.status, 'complete');
+assert.equal(plannedZone.copper.zones[0].clearanceMm, 0.24);
+assert.deepEqual(plannedZone.copper.zones[0].padConnection, {
+    mode: 'thermal', thermalGapMm: 0.26, spokeWidthMm: 0.31, spokeAngleDeg: 90,
+});
+
 const application = adapter.routingResultToEasyEdaApplication({
     status: 'complete', operation: 'route',
     rules: imported.board.rules,
     copper: {
         tracks: [{ net: 'SIG', layer: 'F.Cu', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
         vias: [{ net: 'SIG', at: { x: 2, y: -3 }, diameterMm: 0.6, drillMm: 0.3, fromLayer: 'F.Cu', toLayer: 'B.Cu' }],
-        zones: [],
+        zones: [{
+            id: 'gnd-plane', net: 'SIG', layers: ['F.Cu'],
+            outline: { outer: [{ x: -4, y: -4 }, { x: 4, y: -4 }, { x: 4, y: 4 }, { x: -4, y: 4 }] },
+            priority: 2, minThicknessMm: 0.18, clearanceMm: 0.24,
+            fill: { style: 'hatched', hatchOrientationDeg: 45 },
+            padConnection: {
+                mode: 'thermal', thermalGapMm: 0.26, spokeWidthMm: 0.31, spokeAngleDeg: 90,
+            },
+            removeIslandsBelowMm2: 0,
+        }],
     },
     diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
 });
 assert.deepEqual(application.tracks[0].points, [[1, 3], [2, 3]]);
 assert.deepEqual(application.vias[0].location, [2, 3]);
-assert.equal(application.diagnostics.length, 0);
+assert.deepEqual(application.zones[0], {
+    id: 'gnd-plane', net: 'SIG', layers: [1],
+    outline: [[-4, 4], [4, 4], [4, -4], [-4, -4]], holes: [],
+    priority: 2, minThicknessMm: 0.18, clearanceMm: 0.24,
+    connection: undefined,
+    fill: { style: 'hatched', hatchOrientationDeg: 45 },
+    padConnection: {
+        mode: 'thermal', thermalGapMm: 0.26, spokeWidthMm: 0.31, spokeAngleDeg: 90,
+    },
+    removeIslandsBelowMm2: 0,
+});
+assert.deepEqual(application.diagnostics.map(item => item.code), ['EASYEDA_RESULT_ZONE_HATCH_APPROXIMATED']);
 
 const stackupApplication = adapter.routingResultToEasyEdaApplication({
     status: 'complete', operation: 'apply-stackup',
@@ -195,6 +236,17 @@ const nativeDrcFixture = {
             'Differential Pair': { default: { editName: 'default', isSetDefault: true, strokeWidthTables: { 1: [0.2] }, diffPairSpacingTables: { 1: [0.2] }, differentailPairLenTolerMax: 1 } },
         },
         Spacing: { 'Safe Spacing': { default: { editName: 'default', isSetDefault: true, tables: { 1: { content: [[0.2, 0.2]] } } } } },
+        Plane: {
+            'Copper Zone': {
+                default: {
+                    editName: 'copperRegion', isSetDefault: true, form: {
+                        singleLayerPadModel: { status: 1, data: { 1: { connectMode: 0, lineClearance: 0.254, lineWidth: 0.254, lineAngle: 90 } } },
+                        multiLayerPadModel: { status: 1, data: { 1: { connectMode: 0, lineClearance: 0.254, lineWidth: 0.254, lineAngle: 90 } } },
+                        trackConnectModel: { status: 1, data: { 1: { trackConnectMode: 0 } } },
+                    },
+                },
+            },
+        },
     },
     netRules: [
         { type: 'net', name: 'SIG' },
@@ -300,6 +352,24 @@ assert.equal(
 const noOpDrc = drcAdapter.routingRulesToEasyEdaDrcBundle(nativeDrcFixture, sourceRoutingRules, sourceRoutingRules);
 assert.deepEqual(noOpDrc, nativeDrcFixture, 'a semantic no-op must preserve the native DRC bundle exactly');
 assert.equal(drcAdapter.diffRoutingRules(sourceRoutingRules, sourceRoutingRules).hasChanges, false);
+
+const zoneDrc = drcAdapter.routingZonesToEasyEdaDrcBundle(nativeDrcFixture, application.zones);
+const zoneRule = zoneDrc.netRules.find(rule => rule.type === 'net' && rule.name === 'SIG');
+assert.equal(zoneRule['Copper Zone'], 'copilot_router_zone_0_copper');
+assert.equal(zoneRule['Copper Safe Spacing'], 'copilot_router_zone_0_spacing');
+const zonePreset = zoneDrc.ruleConfiguration.Plane['Copper Zone'].copilot_router_zone_0_copper;
+assert.equal(zonePreset.form.singleLayerPadModel.data['1'].connectMode, 0);
+assert.equal(zonePreset.form.singleLayerPadModel.data['1'].lineClearance, 0.26);
+assert.equal(zonePreset.form.singleLayerPadModel.data['1'].lineWidth, 0.31);
+assert.equal(zonePreset.form.multiLayerPadModel.data['1'].lineAngle, 90);
+assert.equal(
+    zoneDrc.ruleConfiguration.Spacing['Safe Spacing'].copilot_router_zone_0_spacing.tables['1'].content[0][0],
+    0.24,
+);
+assert.throws(() => drcAdapter.routingZonesToEasyEdaDrcBundle(nativeDrcFixture, [
+    application.zones[0],
+    { ...application.zones[0], padConnection: { mode: 'solid' } },
+]), /different Copper Zone thermal policies/);
 
 const existingClassBundle = structuredClone(nativeDrcFixture);
 existingClassBundle.netRules = [{

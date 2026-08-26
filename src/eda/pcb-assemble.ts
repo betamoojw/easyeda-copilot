@@ -276,6 +276,7 @@ async function createCommittedPour(args: {
     net: string;
     layer: TPCB_LayersOfCopper;
     polygon: IPCB_Polygon;
+    pourFillMethod?: EPCB_PrimitivePourFillMethod;
     preserveSilos?: boolean;
     pourName: string;
     pourPriority: number;
@@ -286,7 +287,7 @@ async function createCommittedPour(args: {
             args.net,
             args.layer,
             args.polygon,
-            EPCB_PrimitivePourFillMethod.SOLID,
+            args.pourFillMethod ?? EPCB_PrimitivePourFillMethod.SOLID,
             args.preserveSilos,
             pourName,
             args.pourPriority,
@@ -739,6 +740,22 @@ export type RoutingCopperApplication = {
         points: BoardPoint[];
         priority?: number;
         minThicknessMm?: number;
+        clearanceMm?: number;
+        connection?: 'solid' | 'thermal' | 'none';
+        fill?: {
+            style: 'solid' | 'hatched';
+            hatchThicknessMm?: number;
+            hatchGapMm?: number;
+            hatchOrientationDeg?: number;
+        };
+        padConnection?: {
+            mode: 'solid' | 'thermal' | 'none';
+            thermalGapMm?: number;
+            spokeWidthMm?: number;
+            spokeCount?: number;
+            spokeAngleDeg?: number;
+        };
+        removeIslandsBelowMm2?: number;
     }>;
 };
 
@@ -847,6 +864,14 @@ async function drawRoutingZones(zones: RoutingCopperApplication['zones']) {
                     net: zone.net,
                     layer: routingCopperLayer(layerValue),
                     polygon,
+                    pourFillMethod: zone.fill?.style === 'hatched'
+                        ? (Math.abs((zone.fill.hatchOrientationDeg ?? 0) % 90 - 45) < 1e-6
+                            ? EPCB_PrimitivePourFillMethod.GRID45
+                            : EPCB_PrimitivePourFillMethod.GRID)
+                        : EPCB_PrimitivePourFillMethod.SOLID,
+                    preserveSilos: zone.removeIslandsBelowMm2 === undefined
+                        ? undefined
+                        : zone.removeIslandsBelowMm2 === 0,
                     pourName: safePrimitiveName('copilot_router', zoneLabel, `L${layerValue}`),
                     pourPriority: zone.priority ?? 0,
                     lineWidth: mmToMil(zone.minThicknessMm ?? DEFAULT_POUR_LINE_WIDTH_MM),

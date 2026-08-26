@@ -50,6 +50,22 @@ export type EasyEdaRoutingApplication = Readonly<{
         holes: readonly (readonly (readonly number[])[])[];
         priority: number;
         minThicknessMm?: number;
+        clearanceMm?: number;
+        connection?: 'solid' | 'thermal' | 'none';
+        fill?: Readonly<{
+            style: 'solid' | 'hatched';
+            hatchThicknessMm?: number;
+            hatchGapMm?: number;
+            hatchOrientationDeg?: number;
+        }>;
+        padConnection?: Readonly<{
+            mode: 'solid' | 'thermal' | 'none';
+            thermalGapMm?: number;
+            spokeWidthMm?: number;
+            spokeCount?: number;
+            spokeAngleDeg?: number;
+        }>;
+        removeIslandsBelowMm2?: number;
     }>[];
     rules: RoutingResult['rules'];
     diagnostics: readonly RoutingDiagnostic[];
@@ -565,6 +581,24 @@ export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEd
             });
             return [];
         }
+        if (zone.fill?.style === 'hatched') {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_ZONE_HATCH_APPROXIMATED', severity: 'warning',
+                message: `Zone ${zone.id ?? index} hatch settings cannot be expressed exactly by the EasyEDA extension API; the nearest native 45/90-degree grid preset will be used.`,
+            });
+        }
+        if (zone.removeIslandsBelowMm2 !== undefined && zone.removeIslandsBelowMm2 > 0) {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_ZONE_ISLAND_THRESHOLD_APPROXIMATED', severity: 'warning',
+                message: `Zone ${zone.id ?? index} island area threshold cannot be expressed by the EasyEDA extension API; all isolated islands will be removed.`,
+            });
+        }
+        if (zone.padConnection?.spokeCount !== undefined) {
+            diagnostics.push({
+                code: 'EASYEDA_RESULT_ZONE_SPOKE_COUNT_UNSUPPORTED', severity: 'warning',
+                message: `Zone ${zone.id ?? index} spoke count is not exposed by the EasyEDA Copper Zone rule API and will follow EasyEDA's native rule behavior.`,
+            });
+        }
         return [{
             id: zone.id,
             net: zone.net,
@@ -573,6 +607,11 @@ export function routingResultToEasyEdaApplication(result: RoutingResult): EasyEd
             holes: [],
             priority: zone.priority ?? 0,
             minThicknessMm: zone.minThicknessMm,
+            clearanceMm: zone.clearanceMm,
+            connection: zone.connection,
+            fill: zone.fill,
+            padConnection: zone.padConnection,
+            removeIslandsBelowMm2: zone.removeIslandsBelowMm2,
         }];
     });
     return {

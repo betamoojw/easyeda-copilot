@@ -1,4 +1,5 @@
 import type { RoutingRules, RoutingRuleValues } from 'eda-copilot-router';
+import type { EasyEdaRoutingApplication } from './easyeda-autoroute-adapter';
 import type {
     PcbDrcBundle,
     PcbDrcDifferentialPairRule,
@@ -229,6 +230,110 @@ function assignDifferentialPreset(
     for (const net of [pair.positive, pair.negative]) {
         for (const occurrence of netOccurrences(netRules, net)) occurrence['Differential Pair'] = name;
     }
+}
+
+function copperZonePadModels(preset: JsonRecord) {
+    const form = record(preset.form);
+    if (!form) throw new TypeError('EasyEDA Copper Zone preset does not expose form fields.');
+    return ['singleLayerPadModel', 'multiLayerPadModel'].map(name => {
+        const model = record(form[name]);
+        const data = record(model?.data);
+        const entry = data && (record(data['1']) ?? Object.values(data).map(record).find(Boolean));
+        if (!model || !entry) {
+            throw new TypeError(`EasyEDA Copper Zone preset does not expose ${name}.data fields.`);
+        }
+        model.status = 1;
+        return entry;
+    });
+}
+
+function assignCopperZonePreset(
+    configuration: JsonRecord,
+    netRules: PcbDrcNetRuleEntry[],
+    zone: EasyEdaRoutingApplication['zones'][number],
+    index: number,
+) {
+    let occurrences = netOccurrences(netRules, zone.net);
+    if (!occurrences.length) {
+        const rule = sourceNetRule(netRules, zone.net);
+        netRules.push(rule);
+        occurrences = [rule];
+    }
+
+    if (zone.clearanceMm !== undefined) {
+        const spacingName = `copilot_router_zone_${index}_spacing`;
+        const spacing = createPreset(configuration, 'Spacing', 'Safe Spacing', spacingName);
+        const updateContent = (value: unknown) => {
+            if (Array.isArray(value)) {
+                for (const child of value) updateContent(child);
+                return;
+            }
+            const item = record(value);
+            if (!item) return;
+            for (const [key, child] of Object.entries(item)) {
+                if (key === 'content') item[key] = rewriteNumbers(child, zone.clearanceMm!);
+                else updateContent(child);
+            }
+        };
+        updateContent(spacing);
+        for (const rule of occurrences) rule['Copper Safe Spacing'] = spacingName;
+    }
+
+    const padConnection = zone.padConnection
+        ?? (zone.connection === undefined ? undefined : { mode: zone.connection });
+    if (!padConnection) return;
+
+    const presetName = `copilot_router_zone_${index}_copper`;
+    const preset = createPreset(configuration, 'Plane', 'Copper Zone', presetName);
+    const connectMode = { thermal: 0, solid: 1, none: 2 }[padConnection.mode];
+    for (const model of copperZonePadModels(preset)) {
+        model.connectMode = connectMode;
+        if (padConnection.thermalGapMm !== undefined) model.lineClearance = padConnection.thermalGapMm;
+        if (padConnection.spokeWidthMm !== undefined) model.lineWidth = padConnection.spokeWidthMm;
+        if (padConnection.spokeAngleDeg !== undefined) model.lineAngle = padConnection.spokeAngleDeg;
+    }
+    for (const rule of occurrences) rule['Copper Zone'] = presetName;
+}
+
+/** Add native per-net copper clearance and thermal presets requested by routed zones. */
+export function routingZonesToEasyEdaDrcBundle(
+    source: PcbDrcBundle,
+    zones: EasyEdaRoutingApplication['zones'],
+): PcbDrcBundle {
+    const ruleConfiguration = clone(source.ruleConfiguration);
+    const netRules = clone(source.netRules);
+    const byNet = new Map<string, EasyEdaRoutingApplication['zones'][number]>();
+
+    for (const zone of zones) {
+        if (zone.clearanceMm === undefined && zone.connection === undefined && zone.padConnection === undefined) {
+            continue;
+        }
+        const previous = byNet.get(zone.net);
+        if (previous) {
+            const previousPolicy = JSON.stringify({
+                clearanceMm: previous.clearanceMm,
+                connection: previous.connection,
+                padConnection: previous.padConnection,
+            });
+            const nextPolicy = JSON.stringify({
+                clearanceMm: zone.clearanceMm,
+                connection: zone.connection,
+                padConnection: zone.padConnection,
+            });
+            if (previousPolicy !== nextPolicy) {
+                throw new TypeError(
+                    `EasyEDA cannot apply different Copper Zone thermal policies to multiple zones on net ${zone.net}.`,
+                );
+            }
+            continue;
+        }
+        byNet.set(zone.net, zone);
+    }
+
+    [...byNet.values()].forEach((zone, index) => {
+        assignCopperZonePreset(ruleConfiguration, netRules, zone, index);
+    });
+    return { ruleConfiguration, netRules };
 }
 
 function sameValues(left: RoutingRuleValues, right: RoutingRuleValues) {

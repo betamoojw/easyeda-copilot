@@ -19,6 +19,7 @@ import {
     diffRoutingRules,
     mergeEasyEdaDrcIntoRoutingRules,
     routingRulesToEasyEdaDrcBundle,
+    routingZonesToEasyEdaDrcBundle,
 } from './easyeda-drc-adapter';
 
 const PCB_DOCUMENT_RESOURCE = 'current-pcb-document';
@@ -122,9 +123,15 @@ async function executeRoutingOperation(
     if (unsupported.length) throw new Error(diagnosticsMessage(unsupported));
     const shouldApplyDrc = result.operation === 'apply-drc' || result.operation === 'all';
     const ruleChanges = diffRoutingRules(sourceRules, result.rules);
-    const bundle = shouldApplyDrc && ruleChanges.hasChanges
+    let bundle = shouldApplyDrc && ruleChanges.hasChanges
         ? routingRulesToEasyEdaDrcBundle(nativeDrc, sourceRules, result.rules)
         : undefined;
+    const zonesWithDrc = application.zones.filter(zone => (
+        zone.clearanceMm !== undefined || zone.connection !== undefined || zone.padConnection !== undefined
+    ));
+    if (zonesWithDrc.length) {
+        bundle = routingZonesToEasyEdaDrcBundle(bundle ?? nativeDrc, zonesWithDrc);
+    }
     signal.throwIfAborted();
 
     context.setStage('applying');
