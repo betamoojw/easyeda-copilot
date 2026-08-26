@@ -109,18 +109,25 @@ async function executeRoutingOperation(
     );
     signal.throwIfAborted();
     const routingErrors = result.diagnostics.filter(item => item.severity === 'error');
-    if (result.status === 'error' || routingErrors.length) {
+    if (result.status === 'error') {
         throw new Error(diagnosticsMessage(routingErrors) || 'PCB router DSL failed.');
     }
 
     context.setStage('preparing_application');
-    const application = routingResultToEasyEdaApplication(result);
+    const translatedApplication = routingResultToEasyEdaApplication(result);
+    const unsupported = adapterErrors(result, translatedApplication.diagnostics);
+    if (unsupported.length) throw new Error(diagnosticsMessage(unsupported));
+    // Import warnings describe native source objects that were deliberately
+    // skipped. Preserve them in the operation result and its artifact instead
+    // of losing them when the router returns successfully.
+    const application = {
+        ...translatedApplication,
+        diagnostics: [...imported.diagnostics, ...translatedApplication.diagnostics],
+    };
     await writeFile(
         join(artifactsDirectory, 'easyeda-routing-application.json'),
         `${JSON.stringify(application, null, 2)}\n`,
     );
-    const unsupported = adapterErrors(result, application.diagnostics);
-    if (unsupported.length) throw new Error(diagnosticsMessage(unsupported));
     const shouldApplyDrc = result.operation === 'apply-drc' || result.operation === 'all';
     const ruleChanges = diffRoutingRules(sourceRules, result.rules);
     let bundle = shouldApplyDrc && ruleChanges.hasChanges

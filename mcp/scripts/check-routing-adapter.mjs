@@ -66,6 +66,67 @@ assert.equal(imported.board.copper.fixed.tracks.length, 1);
 assert.equal(imported.board.rules.nets[0].values.preferredTrackWidthMm, 0.25);
 assert.deepEqual(imported.board.rules.differentialPairs, [{ id: 'pair', positive: 'SIG', negative: 'SIG_N' }]);
 
+const curvedRegionFixture = structuredClone(fixture);
+curvedRegionFixture.fillRegions = [{
+    id: 'round-zone', net: 'SIG', layers: [1, 2],
+    path: [[3.2150114300228427, -10.680871361742723],
+        [2.565024130048242, -10.680871361742723, 180],
+        [3.2150114300228427, -10.680871361742723, 180]],
+}];
+curvedRegionFixture.prohibitedRegions = [{
+    id: 'round-keepout', layers: [1, 2],
+    path: [[-2.565024130048271, -10.680871361742723],
+        [-3.2150114300228716, -10.680871361742723, 180],
+        [-2.565024130048271, -10.680871361742723, 180]],
+}];
+const curvedRegionImport = adapter.importEasyEdaAutorouteJson(curvedRegionFixture);
+assert.ok(curvedRegionImport.board, JSON.stringify(curvedRegionImport.diagnostics));
+assert.equal(curvedRegionImport.board.copper.fixed.zones.length, 1);
+assert.equal(curvedRegionImport.board.keepouts.length, 1);
+assert.ok(curvedRegionImport.board.copper.fixed.zones[0].outline.outer.length >= 32);
+assert.ok(curvedRegionImport.board.keepouts[0].polygon.outer.length >= 32);
+const keepoutXs = curvedRegionImport.board.keepouts[0].polygon.outer.map(point => point.x);
+const keepoutYs = curvedRegionImport.board.keepouts[0].polygon.outer.map(point => point.y);
+assert.ok(Math.abs(Math.min(...keepoutXs) - -3.2150114300228716) < 1e-9);
+assert.ok(Math.abs(Math.max(...keepoutXs) - -2.565024130048271) < 1e-9);
+assert.ok(Math.abs((Math.min(...keepoutYs) + Math.max(...keepoutYs)) / 2 - 10.680871361742723) < 1e-9);
+
+const complexRegionFixture = structuredClone(fixture);
+const complexPath = [
+    [[-4, -4], [4, -4], [4, 4], [-4, 4]],
+    [[0.5, 0], [-0.5, 0, -180], [0.5, 0, -180]],
+];
+complexRegionFixture.fillRegions = [{ id: 'zone-with-hole', net: 'SIG', layer: 1, path: complexPath }];
+complexRegionFixture.prohibitedRegions = [{ id: 'keepout-with-hole', layers: [1, 2], path: complexPath }];
+const complexRegionImport = adapter.importEasyEdaAutorouteJson(complexRegionFixture);
+assert.ok(complexRegionImport.board, JSON.stringify(complexRegionImport.diagnostics));
+assert.equal(complexRegionImport.board.copper.fixed.zones[0].outline.holes.length, 1);
+assert.equal(complexRegionImport.board.keepouts[0].polygon.holes.length, 1);
+assert.ok(complexRegionImport.board.copper.fixed.zones[0].outline.holes[0].length >= 32);
+
+const unsupportedRegionsFixture = structuredClone(fixture);
+unsupportedRegionsFixture.fillRegions = [{
+    id: 'bad-zone', net: 'SIG', layer: 1,
+    path: [[0, 0], [0, 0, 180]],
+}];
+unsupportedRegionsFixture.prohibitedRegions = [{
+    id: 'bad-keepout', layers: [1, 2],
+    path: [[0, 0], [0, 0, 180]],
+}];
+const unsupportedRegionsImport = adapter.importEasyEdaAutorouteJson(unsupportedRegionsFixture);
+assert.ok(unsupportedRegionsImport.board, JSON.stringify(unsupportedRegionsImport.diagnostics));
+assert.equal(unsupportedRegionsImport.board.copper.fixed.zones.length, 0);
+assert.equal(unsupportedRegionsImport.board.keepouts.length, 0);
+assert.deepEqual(
+    unsupportedRegionsImport.diagnostics.map(item => [item.code, item.severity]),
+    [
+        ['EASYEDA_FILL_REGION_UNSUPPORTED', 'warning'],
+        ['EASYEDA_PROHIBITED_REGION_UNSUPPORTED', 'warning'],
+    ],
+);
+assert.match(unsupportedRegionsImport.diagnostics[0].message, /was skipped/);
+assert.match(unsupportedRegionsImport.diagnostics[1].message, /was skipped/);
+
 const differentialPresetFixture = structuredClone(fixture);
 differentialPresetFixture.rules.differentialPairs = {
     diff: [{ width: [0.2], clearance: [0.25], lengthTolerance: 0.1 }],

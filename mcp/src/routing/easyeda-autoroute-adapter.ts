@@ -99,10 +99,94 @@ function point(value: unknown): PointMm | undefined {
     return x === undefined || y === undefined ? undefined : { x, y: y === 0 ? 0 : -y };
 }
 
+type DecodedPath = Readonly<{
+    points: readonly PointMm[];
+    arcCount: number;
+    error?: string;
+}>;
+
+type DecodedPolygon = Readonly<{
+    outer: readonly PointMm[];
+    holes?: readonly (readonly PointMm[])[];
+    arcCount: number;
+    error?: string;
+}>;
+
+const ARC_TOLERANCE_MM = 0.001;
+const MAX_ARC_SEGMENTS = 1024;
+const MAX_PATH_POINTS = 16_384;
+
+function tessellateArc(start: PointMm, end: PointMm, sweepDegrees: number): readonly PointMm[] | undefined {
+    const sweep = sweepDegrees * Math.PI / 180;
+    const absoluteSweep = Math.abs(sweep);
+    const chord = Math.hypot(end.x - start.x, end.y - start.y);
+    if (absoluteSweep < 1e-9) return [end];
+    if (absoluteSweep >= Math.PI * 2 - 1e-9 || chord < 1e-9) return undefined;
+
+    const sine = Math.sin(absoluteSweep / 2);
+    if (Math.abs(sine) < 1e-12) return undefined;
+    const radius = chord / (2 * sine);
+    if (!Number.isFinite(radius) || radius <= 0) return undefined;
+
+    const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+    const normal = { x: -(end.y - start.y) / chord, y: (end.x - start.x) / chord };
+    const centerDistance = radius * Math.cos(absoluteSweep / 2) * Math.sign(sweep);
+    const center = {
+        x: midpoint.x + normal.x * centerDistance,
+        y: midpoint.y + normal.y * centerDistance,
+    };
+    const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
+    const boundedTolerance = Math.min(ARC_TOLERANCE_MM, radius);
+    const maxStep = 2 * Math.acos(Math.max(-1, Math.min(1, 1 - boundedTolerance / radius)));
+    if (!Number.isFinite(maxStep) || maxStep <= 0) return undefined;
+    const segmentCount = Math.max(2, Math.ceil(absoluteSweep / maxStep));
+    if (segmentCount > MAX_ARC_SEGMENTS) return undefined;
+
+    const output = Array.from({ length: segmentCount }, (_, index): PointMm => {
+        const angle = startAngle + sweep * (index + 1) / segmentCount;
+        return { x: center.x + Math.cos(angle) * radius, y: center.y + Math.sin(angle) * radius };
+    });
+    // Preserve exact chaining instead of retaining floating-point drift at the
+    // end of the sampled arc.
+    output[output.length - 1] = end;
+    return output;
+}
+
+function decodePath(value: unknown): DecodedPath {
+    if (!Array.isArray(value) || !value.length) return { points: [], arcCount: 0, error: 'path is empty' };
+    const first = point(value[0]);
+    if (!first) return { points: [], arcCount: 0, error: 'point 0 is invalid' };
+    const output: PointMm[] = [first];
+    let arcCount = 0;
+    for (let index = 1; index < value.length; index += 1) {
+        const source = value[index];
+        const end = point(source);
+        if (!end) return { points: [], arcCount, error: `point ${index} is invalid` };
+        const rawSweep = Array.isArray(source) && source.length >= 3 ? finite(source[2]) : 0;
+        if (rawSweep === undefined) return { points: [], arcCount, error: `point ${index} has an invalid arc angle` };
+        if (Math.abs(rawSweep) < 1e-9) output.push(end);
+        else {
+            // point() reflects EasyEDA's Y axis. Reflection reverses the signed
+            // sweep, so tessellate using the opposite angle in RoutingBoard's
+            // coordinate system.
+            const sampled = tessellateArc(output.at(-1)!, end, -rawSweep);
+            if (!sampled) return {
+                points: [], arcCount,
+                error: `arc ending at point ${index} cannot be represented within the geometry limits`,
+            };
+            output.push(...sampled);
+            arcCount += 1;
+        }
+        if (output.length > MAX_PATH_POINTS) return {
+            points: [], arcCount,
+            error: `path exceeds the ${MAX_PATH_POINTS}-point geometry limit`,
+        };
+    }
+    return { points: output, arcCount };
+}
+
 function path(value: unknown) {
-    return (Array.isArray(value) ? value : [])
-        .map(point)
-        .filter((item): item is PointMm => Boolean(item));
+    return decodePath(value).points;
 }
 
 function openRing(points: readonly PointMm[]) {
@@ -112,6 +196,34 @@ function openRing(points: readonly PointMm[]) {
         output[0].y - output.at(-1)!.y,
     ) < 1e-8) output.pop();
     return output;
+}
+
+function decodePolygon(value: unknown): DecodedPolygon {
+    if (!Array.isArray(value) || !value.length) {
+        return { outer: [], arcCount: 0, error: 'polygon is empty' };
+    }
+    // Autoroute JSON normally contains one tuple path. Accept a nested array as
+    // a complex polygon too: the first ring is the outer contour and the rest
+    // are holes, matching EasyEDA's native polygon convention.
+    const complex = Array.isArray(value[0]) && Array.isArray(value[0][0]);
+    const sources = complex ? value : [value];
+    const rings: PointMm[][] = [];
+    let arcCount = 0;
+    for (let index = 0; index < sources.length; index += 1) {
+        const decoded = decodePath(sources[index]);
+        const ring = openRing(decoded.points);
+        arcCount += decoded.arcCount;
+        if (decoded.error || ring.length < 3) return {
+            outer: [], arcCount,
+            error: decoded.error ? `ring ${index}: ${decoded.error}` : `ring ${index} has fewer than three usable points`,
+        };
+        rings.push(ring);
+    }
+    return {
+        outer: rings[0],
+        ...(rings.length > 1 ? { holes: rings.slice(1) } : {}),
+        arcCount,
+    };
 }
 
 function rotate(pointValue: PointMm, degrees: number): PointMm {
@@ -289,31 +401,45 @@ function defaultRules(values: readonly RoutingRuleValues[]): RoutingRuleValues {
 function importedZones(root: JsonRecord, layerNames: readonly string[], diagnostics: RoutingDiagnostic[]) {
     return records(root.fillRegions).flatMap((region, index): RoutedZone[] => {
         const net = text(region.net);
-        const outer = openRing(path(region.path ?? region.outline));
+        const polygon = decodePolygon(region.path ?? region.outline);
         const layers = layerIds(region.layers ?? [region.layer]).filter(layer => layerNames.includes(layer));
-        if (!net || outer.length < 3 || !layers.length) {
+        if (!net || polygon.outer.length < 3 || !layers.length) {
+            const reason = polygon.error ?? (!net ? 'the region has no electrical net'
+                : polygon.outer.length < 3 ? 'the region has fewer than three usable polygon points'
+                    : 'the region has no supported copper layers');
             diagnostics.push({
                 code: 'EASYEDA_FILL_REGION_UNSUPPORTED', severity: 'warning',
-                message: `fillRegions[${index}] could not be represented as fixed copper.`,
+                message: `fillRegions[${index}] was skipped: ${reason}.`,
             });
             return [];
         }
-        return [{ id: text(region.id), net, layers, outline: { outer }, connection: 'solid' }];
+        return [{
+            id: text(region.id), net, layers,
+            outline: { outer: polygon.outer, ...(polygon.holes ? { holes: polygon.holes } : {}) },
+            connection: 'solid',
+        }];
     });
 }
 
 function importedKeepouts(root: JsonRecord, layerNames: readonly string[], diagnostics: RoutingDiagnostic[]) {
     return records(root.prohibitedRegions).flatMap((region, index) => {
-        const outer = openRing(path(region.path ?? region.outline));
+        const polygon = decodePolygon(region.path ?? region.outline);
         const layers = layerIds(region.layers ?? [region.layer]).filter(layer => layerNames.includes(layer));
-        if (outer.length < 3 || !layers.length) {
+        if (polygon.outer.length < 3 || !layers.length) {
+            const reason = polygon.error ?? (polygon.outer.length < 3
+                ? 'the region has fewer than three usable polygon points'
+                : 'the region has no supported copper layers');
             diagnostics.push({
-                code: 'EASYEDA_PROHIBITED_REGION_UNSUPPORTED', severity: 'error',
-                message: `prohibitedRegions[${index}] could not be represented safely.`,
+                code: 'EASYEDA_PROHIBITED_REGION_UNSUPPORTED', severity: 'warning',
+                message: `prohibitedRegions[${index}] was skipped: ${reason}.`,
             });
             return [];
         }
-        return [{ id: text(region.id), layers, polygon: { outer }, forbid: { tracks: true, vias: true, zones: true } }];
+        return [{
+            id: text(region.id), layers,
+            polygon: { outer: polygon.outer, ...(polygon.holes ? { holes: polygon.holes } : {}) },
+            forbid: { tracks: true, vias: true, zones: true },
+        }];
     });
 }
 
