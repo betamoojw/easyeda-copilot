@@ -281,14 +281,23 @@ async function drawRect(blocksRect: CircuitAssembly['blocks_rect'], offset: Offs
                 ESCH_PrimitiveFillStyle.NONE,
             );
 
-            const descArr = chunkArray(block.description.split(' '), 8).map(arr => arr.join(' '))
-            const desc = descArr.join('\n');
-
+            const description = block.description.trim();
+            const descArr = description
+                ? chunkArray(description.split(/\s+/), 8).map(arr => arr.join(' '))
+                : [];
+            if (descArr.length) {
+                await eda.sch_PrimitiveText.create(
+                    x, y + 3 + (5 * descArr.length), descArr.join('\n'), undefined, COPILOT_BLOCK_COLOR, undefined, 5,
+                );
+            }
             await eda.sch_PrimitiveText.create(
-                x, y + 3 + (5 * descArr.length), desc, undefined, COPILOT_BLOCK_COLOR, undefined, 5,
-            );
-            await eda.sch_PrimitiveText.create(
-                x, y + 18 + (5 * descArr.length), block.name, undefined, COPILOT_BLOCK_COLOR, undefined, 14,
+                x,
+                y + 18 + (5 * descArr.length),
+                block.name,
+                undefined,
+                COPILOT_BLOCK_COLOR,
+                undefined,
+                14,
             );
 
         } catch (error) {
@@ -658,12 +667,12 @@ async function assembleCircuitTask(circuit: CircuitAssembly) {
 
 export function assembleCircuit(...args: Parameters<typeof assembleCircuitTask>) {
     return assembleQueue.add(async () => {
-        if (VERSION_EDASYEDA[0] < 3) {
-            eda.sys_Log.add('[assemble] EasyEDA < 3 detected; using legacy assembler');
-            return await assembleCircuitTask(args[0]);
-        }
         await sch_PrimitiveWireSnap.activate();
         try {
+            if (VERSION_EDASYEDA[0] < 3) {
+                eda.sys_Log.add('[assemble] EasyEDA < 3 detected; using legacy assembler');
+                return await assembleCircuitTask(args[0]);
+            }
             return await assembleCircuitSourceTask(args[0], assembleCircuitTask, drawRect);
         } finally {
             sch_PrimitiveWireSnap.deactivate();

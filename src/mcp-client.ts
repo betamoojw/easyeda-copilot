@@ -9,7 +9,7 @@ import { checkPcbDrc } from './eda/drc';
 import { getPcb, getPcbExistingPlacement, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
 import { getSchematic } from './eda/schematic';
 import { estimateSchematicSheetSpace } from './eda/sheet-space';
-import { withTimeout } from './eda/utils';
+import { rmPartFromDesignator, withTimeout } from './eda/utils';
 import '@copilot/shared/types/eda';
 import { ExplainCircuit } from '@copilot/shared/types/circuit';
 import PQueue from 'p-queue';
@@ -160,7 +160,7 @@ async function getBeautifyComponentIds(expectedDesignators: string[]) {
     return components.filter(component => {
         const componentType = component.getState_ComponentType();
         if (componentType === ESCH_PrimitiveComponentType.COMPONENT) {
-            const designator = component.getState_Designator()?.trim().replace(/\.\d+$/, '') ?? '';
+            const designator = rmPartFromDesignator(component.getState_Designator?.() ?? '');
             return expected.has(designator);
         }
 
@@ -175,7 +175,7 @@ async function waitForBeautifyComponents(expectedDesignators: string[], timeoutM
     do {
         const components = await eda.sch_PrimitiveComponent.getAll(ESCH_PrimitiveComponentType.COMPONENT);
         const actualDesignators = new Set(components.map(component => (
-            component.getState_Designator().trim().replace(/\.\d+$/, '')
+            rmPartFromDesignator(component.getState_Designator())
         )));
         missing = expectedDesignators.filter(designator => !actualDesignators.has(designator));
         if (!missing.length) return;
@@ -184,6 +184,47 @@ async function waitForBeautifyComponents(expectedDesignators: string[], timeoutM
     } while (true);
 
     throw new Error(`Beautify assembly omitted components after waiting for EasyEDA: ${missing.join(', ')}`);
+}
+
+type BeautifyComponentIdentity = {
+    designator: string;
+    subPartName: string;
+    uniqueId: string;
+};
+
+async function getBeautifyComponentIdentities(expectedDesignators: string[]) {
+    const expected = new Set(expectedDesignators);
+    const components = await eda.sch_PrimitiveComponent.getAll(ESCH_PrimitiveComponentType.COMPONENT);
+    return components.flatMap(component => {
+        const designator = rmPartFromDesignator(component.getState_Designator?.() ?? '');
+        const uniqueId = component.getState_UniqueId();
+        if (!expected.has(designator) || !uniqueId) return [];
+        return [{
+            designator,
+            subPartName: component.getState_SubPartName?.() ?? '',
+            uniqueId,
+        } satisfies BeautifyComponentIdentity];
+    });
+}
+
+async function restoreBeautifyComponentIdentities(saved: BeautifyComponentIdentity[]) {
+    const components = await eda.sch_PrimitiveComponent.getAll(ESCH_PrimitiveComponentType.COMPONENT);
+    const available = new Set(components);
+
+    for (const identity of saved) {
+        const component = [...available].find(candidate => (
+            rmPartFromDesignator(candidate.getState_Designator?.() ?? '') === identity.designator
+            && (candidate.getState_SubPartName?.() ?? '') === identity.subPartName
+        )) ?? [...available].find(candidate => (
+            rmPartFromDesignator(candidate.getState_Designator?.() ?? '') === identity.designator
+        ));
+        if (!component) {
+            throw new Error(`Cannot restore Unique ID for beautified component ${identity.designator}`);
+        }
+        available.delete(component);
+        component.setState_UniqueId(identity.uniqueId);
+        await component.done();
+    }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -849,14 +890,13 @@ async function saveAllOpenDocuments() {
         const saved = await saveCurrentDocument(originalDocument);
         if (!saved) throw new Error(`Failed to save current document: ${originalDocument.uuid}`);
         return [{
-            tab_id: originalDocument.tabId,
             document_uuid: originalDocument.uuid,
             document_type: originalDocument.documentType,
         }];
     }
 
     const savedDocuments: Array<{
-        tab_id: string;
+        document_uuid: string;
         title: string;
         document_type: EDMT_EditorDocumentType;
     }> = [];
@@ -870,7 +910,7 @@ async function saveAllOpenDocuments() {
             const saved = await saveActiveDocument(tab.documentType);
             if (!saved) throw new Error(`Failed to save document before switching projects: ${tab.title}`);
             savedDocuments.push({
-                tab_id: tab.tabId,
+                document_uuid: tab.uuid,
                 title: tab.title,
                 document_type: tab.documentType,
             });
@@ -1395,7 +1435,7 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             const tabId = await eda.dmt_EditorControl.openDocument(documentUuid);
             if (!tabId) throw new Error(`Failed to open document: ${documentUuid}`);
 
-            reply(true, { tabId, documentUuid });
+            reply(true, { opened: true, document_uuid: documentUuid });
             return;
         }
 
@@ -1410,7 +1450,6 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                 saved: true,
                 document_uuid: document.uuid,
                 document_type: document.documentType,
-                tab_id: document.tabId,
             });
             return;
         }
@@ -1434,12 +1473,11 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             if (!tabId) throw new Error(`Failed to reopen current document: ${document.uuid}`);
 
             reply(true, {
-                documentUuid: document.uuid,
-                documentType: document.documentType,
+                document_uuid: document.uuid,
+                document_type: document.documentType,
                 saved,
                 closed,
-                tabId,
-                settleMs,
+                settle_ms: settleMs,
             });
             return;
         }
@@ -1646,6 +1684,7 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
 
             let mutationStarted = false;
             try {
+                const componentIdentities = await getBeautifyComponentIdentities(expectedDesignators);
                 mutationStarted = true;
 
                 await deleteCopilotBlockBoxes();
@@ -1672,6 +1711,7 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
 
                 await assembleCircuit(circuit as Parameters<typeof assembleCircuit>[0]);
                 await waitForBeautifyComponents(expectedDesignators);
+                await restoreBeautifyComponentIdentities(componentIdentities);
 
                 reply(true, { assembled: true, checkpointId });
             } catch (error) {
