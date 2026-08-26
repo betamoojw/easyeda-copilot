@@ -548,17 +548,21 @@ export function renderPcbToSvg(data: RawPcb, options: PreviewOptions) {
         : '';
 
     const parts: string[] = [];
+    const orderedLayers = normalizeRenderOrder(options);
 
     if (boardPath) {
         parts.push(`<defs><clipPath id="${boardClipId}"><path d="${boardPath}" /></clipPath></defs>`);
+        const unclippedPads = orderedLayers.flatMap(layer => {
+            if (layer === 'MULTI' && !shouldRenderMultiPads(options)) return [];
+            return (data.pads || []).filter(pad => pad.layer === layer).map(pad => renderPad(pad, options));
+        });
+        parts.push(`<g data-unclipped-board-pads="true">${unclippedPads.join('')}</g>`);
         parts.push(`<g clip-path="url(#${boardClipId})">`);
         // parts.push(`<rect x="${viewBox.minX}" y="${viewBox.minY}" width="${vbWidth}" height="${vbHeight}" fill="${LAYER_COLORS.board}" />`);
     } else {
         parts.push(`<rect x="${viewBox.minX}" y="${viewBox.minY}" width="${vbWidth}" height="${vbHeight}" fill="#222" />`);
         parts.push('<g>');
     }
-
-    const orderedLayers = normalizeRenderOrder(options);
 
     for (const layer of orderedLayers) {
         const layerGroup: string[] = [];
