@@ -12,7 +12,7 @@ import { RawPcb, RawPcbArc, RawPcbComponent, RawPcbPad, RawPcbPolygon, RawPcbTra
 import { checkPcbDrc } from "./drc";
 import { PcbLayerName } from "@copilot/shared/types/pcb/shared";
 import { milToMm, mmToMil, round, safeString, VERSION_EDASYEDA } from "./utils";
-import { easyEdaPointToPlacement } from "./pcb-existing-placement";
+import { easyEdaPointToPlacement, easyEdaRotationToPlacement } from "./pcb-existing-placement";
 
 const MIL_TO_MM = 25.4 / 1000;
 const SNAP_TOLERANCE_MIL = mmToMil(0.05);
@@ -515,11 +515,12 @@ export async function getPcbExistingPlacement() {
                 x: milToMm(primitive.getState_X()),
                 y: milToMm(primitive.getState_Y()),
             }, origin);
+            const placementLayer = layer === EPCB_LayerId.BOTTOM ? 'bottom' as const : 'top' as const;
             return [{
                 designator,
                 ...position,
-                rotate: normalizeAngle(primitive.getState_Rotation()),
-                layer: layer === EPCB_LayerId.BOTTOM ? 'bottom' as const : 'top' as const,
+                rotate: easyEdaRotationToPlacement(normalizeAngle(primitive.getState_Rotation()), placementLayer),
+                layer: placementLayer,
             }];
         }),
     };

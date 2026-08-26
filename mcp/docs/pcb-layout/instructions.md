@@ -68,7 +68,7 @@ signalPath("RF_ANT", [
 
 Use `board.auto(...)` unless dimensions are mechanically fixed. For an ordinary compact board, useful starting values are density `0.4`, component clearance `0.25-0.5 mm`, and grid `0.5` or `1 mm`. Footprint geometry and mechanics take priority.
 
-`clearance` includes body and silkscreen bounds. Avoid a blanket `1.3 mm` clearance. For `capCluster`, a starting gap of `0.25-0.4 mm` is usually appropriate. Use `compactness: "high"` only when area is genuinely constrained.
+`clearance` includes body and silkscreen bounds and defaults to `0.35 mm`. For `capCluster`, a starting gap of `0.25-0.4 mm` is usually appropriate. Use `compactness: "high"` only when area is genuinely constrained.
 
 ## Result handling
 

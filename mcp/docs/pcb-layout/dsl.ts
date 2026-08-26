@@ -40,9 +40,9 @@ interface BoardOptions {
   layers?: Layer[];
   /** Default component side. Default: "top". */
   defaultLayer?: Layer;
-  /** Minimum body-to-body component clearance. Used as hard placement clearance. Default 1.3mm. This is not wire/copper clearance. */
+  /** Minimum body-to-body component clearance. Used as hard placement clearance. Default 0.35mm. This is not wire/copper clearance. */
   clearance?: number;
-  /** Minimum component body distance from board edge. Default 2.5mm. */
+  /** Minimum component body distance from board edge. Default 0.8mm. */
   edge?: number;
 }
 

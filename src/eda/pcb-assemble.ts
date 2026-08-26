@@ -653,8 +653,8 @@ async function deleteOldBoardPads() {
 }
 
 async function drawPads(pads: BoardAssemble["pads"]) {
-    await deleteOldBoardPads();
     if (!pads?.length) return;
+    await deleteOldBoardPads();
 
     for (let i = 0; i < pads.length; i++) {
         const pad = pads[i];

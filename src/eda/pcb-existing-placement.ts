@@ -5,11 +5,12 @@ export type PlacementPoint = {
 
 export function easyEdaPointToPlacement(point: PlacementPoint, origin: PlacementPoint): PlacementPoint {
     return {
-        x: roundCoordinate(point.x - origin.x),
-        y: roundCoordinate(origin.y - point.y),
+        x: point.x - origin.x,
+        y: origin.y - point.y,
     };
 }
 
-function roundCoordinate(value: number) {
-    return Math.round(value * 10) / 10;
+export function easyEdaRotationToPlacement(rotation: number, layer: "top" | "bottom") {
+    const angle = layer === "bottom" ? -rotation : 180 - rotation;
+    return ((angle % 360) + 360) % 360;
 }
