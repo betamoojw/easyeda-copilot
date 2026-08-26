@@ -6,6 +6,7 @@ import { startBridge } from './bridge/index';
 import { registerPcbTools } from './tools/pcb/index';
 import { registerCheckpointTools } from './tools/checkpoint';
 import { registerCircuitTools } from './tools/circuit';
+import { registerDesignatorTools } from './tools/designators';
 import { registerDocsTools } from './tools/docs';
 import { registerDrcTools } from './tools/drc';
 import { registerEasyEdaInstancesTools } from './tools/easyeda-instances';
@@ -76,6 +77,7 @@ async function main() {
     registerPcbTools(server, bridge);
     registerCheckpointTools(server, bridge);
     registerCircuitTools(server, bridge);
+    registerDesignatorTools(server, bridge);
     registerDocsTools(server, bridge);
     registerDrcTools(server, bridge);
     registerEasyEdaInstancesTools(server, bridge);

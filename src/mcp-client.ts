@@ -1,4 +1,5 @@
 import { assembleCircuit, deleteCopilotBlockBoxes } from './eda/assemble';
+import { annotateDesignators } from './eda/annotate-designators';
 import {
     applyRoutingCopper,
     assembleBoard,
@@ -1235,6 +1236,13 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             const primitiveIds = await eda.sch_PrimitiveComponent.getAllPrimitiveId().catch(() => []);
             const schematic = await getSchematic([...primitiveIds], { disableExtractPos: true });
             reply(true, schematic);
+            return;
+        }
+
+        if (message.event === 'annotate-designators') {
+            const mode = body.mode;
+            if (mode !== 'preserve' && mode !== 'resequence') throw new Error('Invalid annotation mode.');
+            reply(true, await annotateDesignators(mode));
             return;
         }
 
