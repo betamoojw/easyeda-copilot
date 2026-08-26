@@ -12,6 +12,7 @@ import { RawPcb, RawPcbArc, RawPcbComponent, RawPcbPad, RawPcbPolygon, RawPcbTra
 import { checkPcbDrc } from "./drc";
 import { PcbLayerName } from "@copilot/shared/types/pcb/shared";
 import { milToMm, mmToMil, round, safeString, VERSION_EDASYEDA } from "./utils";
+import { easyEdaPointToPlacement } from "./pcb-existing-placement";
 
 const MIL_TO_MM = 25.4 / 1000;
 const SNAP_TOLERANCE_MIL = mmToMil(0.05);
@@ -503,20 +504,20 @@ export async function getPcbExistingPlacement() {
 
     return {
         board: {
-            polygon: boardPolygon.map(point => ({
-                x: round(point.x - origin.x, 10),
-                y: round(point.y - origin.y, 10),
-            })),
+            polygon: boardPolygon.map(point => easyEdaPointToPlacement(point, origin)),
         },
         components: primitives.flatMap(primitive => {
             const designator = primitive.getState_Designator()?.trim();
             const layer = primitive.getState_Layer();
             if (!designator || (layer !== EPCB_LayerId.TOP && layer !== EPCB_LayerId.BOTTOM)) return [];
 
+            const position = easyEdaPointToPlacement({
+                x: milToMm(primitive.getState_X()),
+                y: milToMm(primitive.getState_Y()),
+            }, origin);
             return [{
                 designator,
-                x: round(milToMm(primitive.getState_X()) - origin.x, 10),
-                y: round(milToMm(primitive.getState_Y()) - origin.y, 10),
+                ...position,
                 rotate: normalizeAngle(primitive.getState_Rotation()),
                 layer: layer === EPCB_LayerId.BOTTOM ? 'bottom' as const : 'top' as const,
             }];
