@@ -14,6 +14,7 @@ export default defineConfig({
         'src/pcb-preview/cli.ts',
         'src/pcb-preview/index.ts',
         'src/operations/manager.ts',
+        'src/routing/routing-operation.ts',
         'src/routing/easyeda-autoroute-adapter.ts',
         'src/routing/easyeda-drc-adapter.ts',
         'src/tools/projects.ts',

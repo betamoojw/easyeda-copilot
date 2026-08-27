@@ -44,6 +44,11 @@ function adapterErrors(result: RoutingResult, diagnostics: readonly RoutingDiagn
     return diagnostics.slice(result.diagnostics.length).filter(item => item.severity === 'error');
 }
 
+/** Partial routing carries applicable copper; only a terminal router failure blocks the transaction. */
+export function routingResultBlocksApplication(result: Pick<RoutingResult, 'status'>) {
+    return result.status === 'error';
+}
+
 async function executeRoutingOperation(
     bridge: Bridge,
     dslFile: string,
@@ -119,7 +124,7 @@ async function executeRoutingOperation(
     );
     signal.throwIfAborted();
     const routingErrors = result.diagnostics.filter(item => item.severity === 'error');
-    if (result.status === 'error' || routingErrors.length > 0) {
+    if (routingResultBlocksApplication(result)) {
         throw new Error(diagnosticsMessage(routingErrors) || 'PCB router DSL failed.');
     }
 
