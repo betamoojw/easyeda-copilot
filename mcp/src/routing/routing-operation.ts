@@ -119,7 +119,7 @@ async function executeRoutingOperation(
     );
     signal.throwIfAborted();
     const routingErrors = result.diagnostics.filter(item => item.severity === 'error');
-    if (result.status === 'error') {
+    if (result.status === 'error' || routingErrors.length > 0) {
         throw new Error(diagnosticsMessage(routingErrors) || 'PCB router DSL failed.');
     }
 
