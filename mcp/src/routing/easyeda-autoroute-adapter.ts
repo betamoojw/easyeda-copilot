@@ -18,6 +18,8 @@ type JsonRecord = Record<string, unknown>;
 
 export type EasyEdaAutorouteCaptureOptions = Readonly<{
     clearRouting?: RoutingClearIntent;
+    copperLayerCount?: number;
+    copperLayerIds?: readonly number[];
 }>;
 
 export type EasyEdaAutorouteImport = Readonly<{
@@ -421,6 +423,12 @@ function importedZones(root: JsonRecord, layerNames: readonly string[], diagnost
     });
 }
 
+function copperLayerIdsForCount(value: unknown) {
+    const count = finite(value);
+    if (count === undefined || !Number.isInteger(count) || count < 2 || count > 32 || count % 2 !== 0) return [];
+    return [1, ...Array.from({ length: count - 2 }, (_, index) => 15 + index), 2];
+}
+
 function importedKeepouts(root: JsonRecord, layerNames: readonly string[], diagnostics: RoutingDiagnostic[]) {
     return records(root.prohibitedRegions).flatMap((region, index) => {
         const polygon = decodePolygon(region.path ?? region.outline);
@@ -455,7 +463,18 @@ export function importEasyEdaAutorouteJson(
     const outline = openRing(path(record(root.boardOutline)?.path));
     const routeLayerIds = numberList(record(root.layers)?.route);
     const notRouteLayerIds = numberList(record(root.layers)?.notRoute);
-    const allLayerIds = [...new Set([...routeLayerIds, ...notRouteLayerIds])].sort((left, right) => {
+    const footprintRecords = record(root.footprints) ?? {};
+    const footprintLayerIds = Object.values(footprintRecords).flatMap(footprint =>
+        Object.values(record(record(footprint)?.pads) ?? {}).flatMap(pad => numberList(record(pad)?.layers)));
+    const hostLayerIds = [
+        ...numberList(options.copperLayerIds),
+        ...copperLayerIdsForCount(options.copperLayerCount),
+    ];
+    const allLayerIds = [...new Set([
+        ...routeLayerIds,
+        ...notRouteLayerIds,
+        ...(hostLayerIds.length ? hostLayerIds : footprintLayerIds),
+    ])].sort((left, right) => {
         const rank = (id: number) => id === 1 ? 0 : id === 2 ? Number.MAX_SAFE_INTEGER : id - 13;
         return rank(left) - rank(right);
     });
@@ -466,7 +485,6 @@ export function importEasyEdaAutorouteJson(
     });
     const layerNames = layers.map(layer => layer.name);
     const componentRecords = record(root.components) ?? {};
-    const footprintRecords = record(root.footprints) ?? {};
     const components: RoutingBoard['components'][number][] = [];
     const pads: RoutingBoard['pads'][number][] = [];
     const netNames = new Set<string>();

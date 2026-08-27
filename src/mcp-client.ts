@@ -1400,6 +1400,7 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                 type: file.type,
                 text,
                 drc: await exportPcbDrcRules(),
+                stack: await getPcbStackLayers(),
             });
             return;
         }

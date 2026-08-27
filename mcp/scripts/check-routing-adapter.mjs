@@ -60,6 +60,21 @@ assert.deepEqual(imported.board.pads.map(item => item.number), ['1', '1', '1']);
 assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x: 1, y: -1 }, { x: -2, y: 0 }]);
 assert.deepEqual(imported.board.pads[0].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
 assert.deepEqual(imported.board.pads[1].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
+
+const fourLayerPadFixture = structuredClone(fixture);
+fourLayerPadFixture.footprints.tht.pads.p0.layers = [1, 2, 15, 16];
+const fourLayerPadImport = adapter.importEasyEdaAutorouteJson(fourLayerPadFixture);
+assert.ok(fourLayerPadImport.board, JSON.stringify(fourLayerPadImport.diagnostics));
+assert.deepEqual(fourLayerPadImport.board.layers.map(item => item.name), ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
+    'through-hole pad layers must recover a multilayer stack omitted by EasyEDA autoroute layers');
+
+const fourLayerStackImport = adapter.importEasyEdaAutorouteJson(fixture, {
+    copperLayerCount: 4,
+    copperLayerIds: [1, 15, 16, 2],
+});
+assert.ok(fourLayerStackImport.board, JSON.stringify(fourLayerStackImport.diagnostics));
+assert.deepEqual(fourLayerStackImport.board.layers.map(item => item.name), ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
+    'authoritative EasyEDA stack metadata must augment an outer-only autoroute layer list');
 assert.deepEqual(imported.board.pads[2].shape, { kind: 'circle', diameterMm: 2.5 });
 assert.equal(imported.board.copper.editable.tracks.length, 0);
 assert.equal(imported.board.copper.fixed.tracks.length, 1);
