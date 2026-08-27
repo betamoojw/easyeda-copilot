@@ -360,6 +360,7 @@ assert.equal(matchedGroup.sub[0].Track, 'copilot_router_net_2_track');
 assert.equal(matchedGroup.sub[0]['Differential Pair'], undefined);
 
 assert.equal(translated.ruleConfiguration.Physics.Track.copilot_router_class_0_track.form.data['1'].defaultValue, 0.3);
+assert.equal(translated.ruleConfiguration.Physics.Track.copilot_router_class_0_track.form.data['1'].maxValue, 1.3);
 assert.equal(translated.ruleConfiguration.Physics.Track.copilot_router_class_0_track.isSetDefault, false);
 assert.equal(translated.ruleConfiguration.Spacing['Safe Spacing'].copilot_router_class_0_spacing.tables['1'].content[0][0], 0.22);
 assert.equal(
@@ -368,13 +369,18 @@ assert.equal(
     'a changed global rule must update the native default Track preset',
 );
 assert.equal(
+    translated.ruleConfiguration.Physics.Track.default.form.data['1'].maxValue,
+    1.3,
+    'a changed Track preset must leave 1mm headroom above the requested width',
+);
+assert.equal(
     translated.ruleConfiguration.Spacing['Safe Spacing'].default.tables['1'].content[0][0],
     0.22,
     'a changed global rule must update the native default Safe Spacing preset',
 );
 
 const compactDrc = drcAdapter.summarizeEasyEdaDrcBundle(translated);
-assert.deepEqual(compactDrc.global.trackWidthMm, { min: 0.2, preferred: 0.3, max: 0.3 });
+assert.deepEqual(compactDrc.global.trackWidthMm, { min: 0.2, preferred: 0.3, max: 1.3 });
 assert.deepEqual(compactDrc.global.viaDiameterMm, { min: 0.6, preferred: 0.7, max: 0.7 });
 assert.deepEqual(compactDrc.netClasses.FAST.nets, ['SIG', 'SIG_N']);
 assert.deepEqual(

@@ -155,6 +155,11 @@ function ensureDifferentialPair(
 }
 
 const PHYSICAL_FIELDS = ['Track', 'Via Size', 'Safe Spacing'] as const;
+const TRACK_MAX_WIDTH_MARGIN_MM = 1;
+
+function maximumTrackWidth(values: RoutingRuleValues) {
+    return Math.max(values.minTrackWidthMm, values.preferredTrackWidthMm) + TRACK_MAX_WIDTH_MARGIN_MM;
+}
 
 function copyFields(source: PcbDrcNetRule | RelationRule, targets: readonly PcbDrcNetRule[], fields = PHYSICAL_FIELDS) {
     for (const target of targets) for (const field of fields) {
@@ -176,7 +181,7 @@ function assignPhysicalPresets(
     if (!widthEntry) throw new TypeError('EasyEDA Track preset does not expose form.data width fields.');
     widthEntry.minValue = values.minTrackWidthMm;
     widthEntry.defaultValue = values.preferredTrackWidthMm;
-    widthEntry.maxValue = Math.max(values.minTrackWidthMm, values.preferredTrackWidthMm);
+    widthEntry.maxValue = maximumTrackWidth(values);
     rule.Track = trackName;
 
     const viaName = `${prefix}_via`;
@@ -782,7 +787,7 @@ function updateDefaultPhysicalPresets(configuration: JsonRecord, values: Routing
     if (widthEntry) {
         widthEntry.minValue = values.minTrackWidthMm;
         widthEntry.defaultValue = values.preferredTrackWidthMm;
-        widthEntry.maxValue = Math.max(values.minTrackWidthMm, values.preferredTrackWidthMm);
+        widthEntry.maxValue = maximumTrackWidth(values);
     }
     const via = preset(configuration, 'Physics', 'Via Size', undefined);
     if (via) replaceNamedValues(via, {
