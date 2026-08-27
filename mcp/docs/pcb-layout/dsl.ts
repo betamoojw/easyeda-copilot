@@ -466,6 +466,13 @@ interface SignalPathOptions extends CriticalPairOptions {
   shape?: "flexible" | "straight";
 }
 
+interface RefineGroupOptions {
+  /** Permit group members to exchange their resolved post-placement poses. */
+  swap?: boolean;
+  /** Additional rotations relative to a resolved pose. Only [180] is supported to preserve the component axis. */
+  rotateBy?: number[];
+}
+
 interface CoreIslandOptions extends CriticalPairOptions {
   /** Dominant pin pairs inside this island. The island packer keeps these short before placing lower-priority components. Keep islands small and non-overlapping. */
   pairs?: Array<[PinTargetRef, PinTargetRef]>;
@@ -475,6 +482,8 @@ interface CoreIslandOptions extends CriticalPairOptions {
 declare function criticalPair(source: PinTargetRef, target: PinTargetRef, options?: CriticalPairOptions): void;
 /** Self-contained placement constraint for one critical ordered signal chain, especially an RF or high-speed path through series matching/filter parts. Each tuple is one pad-to-pad segment; adjacent tuples meet on the same pass-through component using different entry/exit pins. Use only when physical path order matters. Do not duplicate its segments with criticalPair() or corePairs(). This does not create copper or guarantee impedance. */
 declare function signalPath(name: string, segments: SignalPathSegment[], options?: SignalPathOptions): void;
+/** Permit atomic post-placement swap/180-degree variants inside this named group. Positions always come from the completed global placement; this does not create new coordinates. Fixed members are never changed without this explicit permission. */
+declare function refineGroup(name: string, components: string[], options: RefineGroupOptions): void;
 /** Bulk helper for several independent dominant pairs inside a functional block. Do not include pairs already covered by signalPath(). */
 declare function corePairs(blockName: string, pairs: Array<[PinTargetRef, PinTargetRef]>, options?: CriticalPairOptions): void;
 /** Define a critical placement island whose internal pair geometry is packed before normal block/component placement. Does not reassign components to blocks. Use for 2-3 dominant components; avoid several islands sharing the same main IC. */

@@ -28,7 +28,7 @@ Every placement DSL for an existing PCB must contain one `preserve(...)` declara
 1. Define the board, holes, blocks, components, and only justified constraints in one complete placement DSL file.
 2. If mechanics changed, read `mechanical-validation.md` and run a focused mechanical preview with `solver({ preview: true, placeOnlyComponents: [...] })`.
 3. Call `make_pcb_layout({ file })`. If it returns `status: "running"`, call `wait_operation({ operation_id })` until terminal.
-4. Inspect `previewSvgPath` and solver diagnostics. A preview result is never assembled.
+4. Inspect `previewSvgPath` and solver diagnostics. If a `post_place_opportunity` suggests `refineGroup`, add it only when that exact swap or rotation is allowed. A preview result is never assembled.
 5. Fix hard errors and one obvious in-scope visual problem; do not chase zero warnings.
 6. Show the preview and ask for user approval.
 7. Remove preview filters when full placement is requested, run the complete DSL, wait when needed, and inspect the final preview.
@@ -63,6 +63,24 @@ signalPath("RF_ANT", [
   [pin("C1", "2"), pin("U1", "ANT")],
 ]);
 ```
+
+## Post-placement refinement
+
+The solver already tries safe 180-degree rotations and swaps for eligible movable components within their block. Do not add `refineGroup` by default.
+
+Use `refineGroup` only when a `post_place_opportunity` diagnostic suggests it, or when named equivalent fixed/preserved components are intentionally allowed to exchange their final poses or rotate 180 degrees. It is permission for a final polish, not a placement command: it creates no coordinates, does not replace blocks or constraints, and may accept no move.
+
+```js
+refineGroup("headers", ["H1", "H2"], { swap: true, rotateBy: [180] });
+```
+
+- `swap: true` requires at least two pose-compatible components: the same part, footprint, or equivalent footprint geometry.
+- `rotateBy` supports only `[180]` and is relative to the resolved pose. The component must also allow that final rotation.
+- Give every group a unique non-empty name. Components cannot appear in multiple refinement groups. Enable `swap`, `rotateBy`, or both.
+- Listing a fixed or preserved component explicitly permits its pose to change. Do not list anything whose exact pose or designator-to-position mapping must remain fixed.
+- Do not use `refineGroup` for `edgeMount`, `edgePlace`, or synthetic `boardPad` components; they are not refinable.
+- A swap moves component identity and pinout to the other resolved pose. For connectors and other mechanical parts, use it only when the parts are truly interchangeable, then inspect orientation and access in the preview.
+- A run that accepts no refinement move is valid. Do not keep adding constraints merely to force a move.
 
 ## Starting values
 

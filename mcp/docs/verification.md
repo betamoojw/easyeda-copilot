@@ -12,6 +12,7 @@ Use only the checks relevant to the requested stage. A successful generator resp
 ## Placement and mechanics
 
 - Treat the solver report and `previewSvgPath` as pre-assembly evidence.
+- When `refineGroup` is used, verify each named designator's new pose and confirm that preserved components outside the group stayed fixed. For connectors or other mechanical parts, inspect orientation and access in the preview. A run with no accepted refinement move is valid.
 - After assembly, use `inspect_component` for affected components.
 - Use `preview_pcb` for connectors, mechanics, suspicious overlap, or a requested visual check; do not render every ordinary edit.
 - On an already routed PCB, run `check_pcb_drc` after moving or adding components because the placement solver does not model all existing copper and board objects.
