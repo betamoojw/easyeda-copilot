@@ -501,7 +501,12 @@ export function importEasyEdaAutorouteJson(
             const shape = importedPadShape(pad, localAt);
             const net = text(componentNets[padKey]);
             if (net) netNames.add(net);
-            const padLayers = layerIds(pad.layers);
+            const padLayers = layerIds(pad.layers).map(layer => {
+                if (componentLayer !== 2) return layer;
+                if (layer === 'F.Cu') return 'B.Cu';
+                if (layer === 'B.Cu') return 'F.Cu';
+                return layer;
+            });
             if (!shape || !padLayers.length) {
                 diagnostics.push({
                     code: 'EASYEDA_PAD_GEOMETRY_INVALID', severity: 'error',

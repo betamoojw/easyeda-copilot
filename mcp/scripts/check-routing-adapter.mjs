@@ -66,6 +66,26 @@ assert.equal(imported.board.copper.fixed.tracks.length, 1);
 assert.equal(imported.board.rules.nets[0].values.preferredTrackWidthMm, 0.25);
 assert.deepEqual(imported.board.rules.differentialPairs, [{ id: 'pair', positive: 'SIG', negative: 'SIG_N' }]);
 
+const bottomFixture = structuredClone(fixture);
+bottomFixture.components = {
+    B1: {
+        ...fixture.components.U1,
+        layer: 2,
+        location: [1, 2],
+        rotation: 270,
+    },
+};
+bottomFixture.tracks = [];
+const bottomImport = adapter.importEasyEdaAutorouteJson(bottomFixture);
+assert.ok(bottomImport.board, JSON.stringify(bottomImport.diagnostics));
+assert.deepEqual(bottomImport.board.components, [
+    { designator: 'B1', at: { x: 1, y: -2 }, rotationDeg: -270, side: 'bottom' },
+]);
+assert.deepEqual(bottomImport.board.pads.map(item => ({ number: item.number, at: item.at, layers: item.layers })), [
+    { number: '1', at: { x: 1, y: -1 }, layers: ['B.Cu'] },
+    { number: '1', at: { x: 1, y: -3 }, layers: ['B.Cu'] },
+]);
+
 const curvedRegionFixture = structuredClone(fixture);
 curvedRegionFixture.fillRegions = [{
     id: 'round-zone', net: 'SIG', layers: [1, 2],
