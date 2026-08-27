@@ -308,16 +308,16 @@ function rectangularPadShape(ring: readonly PointMm[]): RoutingPadShape | undefi
     return { kind: 'rect', widthMm, heightMm };
 }
 
-function importedPadShape(pad: JsonRecord, localAt: PointMm): RoutingPadShape | undefined {
+function importedPadShape(pad: JsonRecord, localAt: PointMm, bottom: boolean): RoutingPadShape | undefined {
     const diameterMm = finite(pad.diameter);
     if (diameterMm !== undefined && diameterMm > 0) {
         return { kind: 'circle', diameterMm };
     }
 
-    const ring = openRing(path(pad.path)).map(item => ({
-        x: item.x - localAt.x,
-        y: item.y - localAt.y,
-    }));
+    const ring = openRing(path(pad.path)).map(item => {
+        const localPoint = bottom ? { x: item.x, y: -item.y } : item;
+        return { x: localPoint.x - localAt.x, y: localPoint.y - localAt.y };
+    });
     return rectangularPadShape(ring) ?? (ring.length >= 3
         ? { kind: 'polygon', polygon: { outer: ring } }
         : undefined);
@@ -509,14 +509,16 @@ export function importEasyEdaAutorouteJson(
         for (const [padKey, padValue] of Object.entries(footprintPads)) {
             const pad = record(padValue);
             if (!pad) continue;
+            // EasyEDA mirrors bottom footprint-local geometry before placing
+            // it. Global coordinates still need Y reflection, but reflecting
+            // a bottom pad's local Y again swaps asymmetric pad identities.
             const localAtYUp = point(pad.location);
             if (!localAtYUp) continue;
-            // point() already reflected Y. Apply the same numeric clockwise
-            // component rotation used by RoutingBoard's y-down convention.
-            const localAt = localAtYUp;
+            const bottom = componentLayer === 2;
+            const localAt = bottom ? { x: localAtYUp.x, y: -localAtYUp.y } : localAtYUp;
             const placed = rotate(localAt, rotationDeg);
             const atPad = { x: at.x + placed.x, y: at.y + placed.y };
-            const shape = importedPadShape(pad, localAt);
+            const shape = importedPadShape(pad, localAt, bottom);
             const net = text(componentNets[padKey]);
             if (net) netNames.add(net);
             const padLayers = layerIds(pad.layers).map(layer => {

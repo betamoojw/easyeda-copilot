@@ -88,7 +88,13 @@ bottomFixture.components = {
         layer: 2,
         location: [1, 2],
         rotation: 270,
+        nets: { p0: 'SIG', p1: 'SIG_N', p2: 'GND' },
     },
+};
+bottomFixture.footprints.fp.pads = {
+    p0: { number: '2', layers: [1], location: [1, 1], path: [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5]] },
+    p1: { number: '1', layers: [1], location: [1, -1], path: [[0.5, -1.5], [1.5, -1.5], [1.5, -0.5], [0.5, -0.5]] },
+    p2: { number: '3', layers: [1], location: [-1, 0], path: [[-1.5, -0.5], [-0.5, -0.5], [-0.5, 0.5], [-1.5, 0.5]] },
 };
 bottomFixture.tracks = [];
 const bottomImport = adapter.importEasyEdaAutorouteJson(bottomFixture);
@@ -96,9 +102,12 @@ assert.ok(bottomImport.board, JSON.stringify(bottomImport.diagnostics));
 assert.deepEqual(bottomImport.board.components, [
     { designator: 'B1', at: { x: 1, y: -2 }, rotationDeg: -270, side: 'bottom' },
 ]);
-assert.deepEqual(bottomImport.board.pads.map(item => ({ number: item.number, at: item.at, layers: item.layers })), [
-    { number: '1', at: { x: 1, y: -1 }, layers: ['B.Cu'] },
-    { number: '1', at: { x: 1, y: -3 }, layers: ['B.Cu'] },
+assert.deepEqual(bottomImport.board.pads.map(item => ({
+    id: item.id, number: item.number, net: item.net, at: item.at, layers: item.layers, shape: item.shape,
+})), [
+    { id: 'B1:p0', number: '2', net: 'SIG', at: { x: 0, y: -1 }, layers: ['B.Cu'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
+    { id: 'B1:p1', number: '1', net: 'SIG_N', at: { x: 2, y: -1 }, layers: ['B.Cu'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
+    { id: 'B1:p2', number: '3', net: 'GND', at: { x: 1, y: -3 }, layers: ['B.Cu'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
 ]);
 
 const curvedRegionFixture = structuredClone(fixture);
