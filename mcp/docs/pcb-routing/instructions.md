@@ -12,12 +12,34 @@ For new or full-board routing, write one DSL file and call the tool once. Put al
 - fabrication and DRC limits;
 - power-net currents;
 - controlled impedance and length/skew requirements when verified physical data exists;
-- planes, polygons, fanout, and required via stitching;
+- planes, required polygons, and required via stitching;
 - routing scope, net importance, and via preferences.
 
 Normally end a full transaction with `runAll()`. Do not route net groups in separate calls merely to create stages. Earlier committed copper becomes an obstacle and can block a better dense-board solution; the router already performs internal stages.
 
 Multiple transactions are allowed for a user-requested partial operation, an isolated rules/copper task, or a focused repair after checking a full attempt. They are usually less efficient. Use `onlyNets(...)` for selected routing and clear only the copper that must be replaced.
+
+## Two-layer GND plane
+
+For a new or fully routed ordinary two-layer board, the GND plane must cover both copper layers. Write `layers: "OUTER"` explicitly; do not rely on the omitted default.
+
+```js
+plane({
+  net: "GND",
+  layers: "OUTER",
+  region: board(),
+});
+```
+
+`OUTER` means TOP and BOTTOM. Use only `TOP` or only `BOTTOM` when the user explicitly requests it or verified board constraints reserve the other layer; state the exact reason. Do not invent a reason from component density or routing convenience. For boards with four or more layers, select reference-plane layers from the intended stack instead of applying `OUTER` or `ALL` by habit.
+
+One `plane(...)` declaration is one logical zone, so `zones: 1` or `planeZones: 1` does not mean one physical layer. EasyEDA creates one pour on every selected layer.
+
+## Fanout is a retry
+
+Do not call `fanout(...)` in the first routing attempt unless the user explicitly requires it. Let normal routing escape the package first. Add fanout only when the no-fanout result shows an escape problem at a dense QFN/QFP or specific pad.
+
+Use the smallest target: prefer `pad(...)` when only some pads fail, and use `component(...)` only when the whole dense package needs the same escape policy. Prefer `method: "auto"`; request `underpad` directly only with a clear reason. A successful fanout is committed before main routing and can consume useful routing corridors.
 
 ## Describe electrical intent
 
@@ -27,7 +49,7 @@ Let the router derive geometry from the effective rules and declared physical as
 - Use `priority: "critical"` only for nets whose failure or late routing can damage the design, such as verified oscillator, clock, reset, or sensitive feedback nets. Use `high` for important head-start routing and leave ordinary nets at `normal`.
 - Use `viaPreference: "avoid"` for short or sensitive nets where a planar route is strongly preferred. `forbid` is a prohibitive routing preference, not a replacement for a fabrication/DRC rule.
 - Use semantic impedance in `signalNet` or `diffPair` only with verified stack/reference information.
-- Use `matchedGroup`, differential skew limits, `plane`, `polygon`, and the appropriate `viaStitch` mode when required. Fanout is off by default; call `fanout(...)` only when the component or pad genuinely needs an explicit dense-package escape.
+- Use `matchedGroup`, differential skew limits, `plane`, `polygon`, and the appropriate `viaStitch` mode when required.
 - Use `drc(...)` and `netClass(...)` for real fabrication limits, not guessed geometry.
 
 Do not manually calculate track width, via diameter/drill, or impedance geometry when semantic intent can derive it. Use explicit geometry only when the user, fabricator, pad geometry, or a verified requirement provides it.
