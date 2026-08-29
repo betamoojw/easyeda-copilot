@@ -240,20 +240,19 @@ function rotate(pointValue: PointMm, degrees: number): PointMm {
 }
 
 function internalLayerName(id: number) {
-    // KRT expects KiCad's canonical copper-layer names internally.  The DSL
-    // remains EDA-neutral: TOP/BOTTOM/INNER_n selectors are resolved by layer
-    // side/index, and routing results are translated back to EasyEDA IDs.
-    if (id === 1) return 'F.Cu';
-    if (id === 2) return 'B.Cu';
-    if (id >= 15 && id <= 44) return `In${id - 14}.Cu`;
+    // The host/router boundary is EDA-neutral. KRT-specific F.Cu/InN.Cu/B.Cu
+    // names are introduced only by copilot-router's KRT adapter.
+    if (id === 1) return 'TOP';
+    if (id === 2) return 'BOTTOM';
+    if (id >= 15 && id <= 44) return `INNER_${id - 14}`;
     return undefined;
 }
 
 function layerId(name: string) {
-    if (name === 'F.Cu' || name === 'TOP') return 1;
-    if (name === 'B.Cu' || name === 'BOTTOM') return 2;
-    const inner = /^(?:In(\d+)\.Cu|INNER_(\d+))$/.exec(name);
-    return inner ? 14 + Number(inner[1] ?? inner[2]) : undefined;
+    if (name === 'TOP') return 1;
+    if (name === 'BOTTOM') return 2;
+    const inner = /^INNER_(\d+)$/.exec(name);
+    return inner ? 14 + Number(inner[1]) : undefined;
 }
 
 function layerIds(value: unknown) {
@@ -523,8 +522,8 @@ export function importEasyEdaAutorouteJson(
             if (net) netNames.add(net);
             const padLayers = layerIds(pad.layers).map(layer => {
                 if (componentLayer !== 2) return layer;
-                if (layer === 'F.Cu') return 'B.Cu';
-                if (layer === 'B.Cu') return 'F.Cu';
+                if (layer === 'TOP') return 'BOTTOM';
+                if (layer === 'BOTTOM') return 'TOP';
                 return layer;
             });
             if (!shape || !padLayers.length) {

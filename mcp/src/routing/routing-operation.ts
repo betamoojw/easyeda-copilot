@@ -109,20 +109,24 @@ async function executeRoutingOperation(
         artifactsDirectory: join(artifactsDirectory, 'krt'),
         keepArtifacts: true,
     });
-    const signal = AbortSignal.any([
+    const routingTimeout = AbortSignal.timeout(ROUTER_TIMEOUT_MS);
+    const routingSignal = AbortSignal.any([
         context.signal,
-        AbortSignal.timeout(ROUTER_TIMEOUT_MS),
+        routingTimeout,
     ]);
     const result = await run({
         ...routerInput,
         backend,
-        signal,
+        signal: routingSignal,
     });
     await writeFile(
         join(artifactsDirectory, 'routing-result.json'),
         `${JSON.stringify(result, null, 2)}\n`,
     );
-    signal.throwIfAborted();
+    // A watchdog-expired KRT run may still return independently audited,
+    // applicable partial copper. Only an explicit operation cancellation may
+    // veto that result after run(); status:error is handled below.
+    context.signal.throwIfAborted();
     const routingErrors = result.diagnostics.filter(item => item.severity === 'error');
     if (routingResultBlocksApplication(result)) {
         throw new Error(diagnosticsMessage(routingErrors) || 'PCB router DSL failed.');
@@ -154,7 +158,7 @@ async function executeRoutingOperation(
     if (zonesWithDrc.length) {
         bundle = routingZonesToEasyEdaDrcBundle(bundle ?? nativeDrc, zonesWithDrc);
     }
-    signal.throwIfAborted();
+    context.signal.throwIfAborted();
 
     context.setStage('applying');
     const applied = record(await bridge.requestEasyEda('apply-routing-result', {

@@ -13,7 +13,7 @@ For new or full-board routing, write one DSL file and call the tool once. Put al
 - power-net currents;
 - controlled impedance and length/skew requirements when verified physical data exists;
 - planes, polygons, fanout, and required via stitching;
-- routing scope and an optional quality policy.
+- routing scope, net importance, and via preferences.
 
 Normally end a full transaction with `runAll()`. Do not route net groups in separate calls merely to create stages. Earlier committed copper becomes an obstacle and can block a better dense-board solution; the router already performs internal stages.
 
@@ -24,8 +24,10 @@ Multiple transactions are allowed for a user-requested partial operation, an iso
 Let the router derive geometry from the effective rules and declared physical assumptions:
 
 - Use `powerNet("VBUS", { maxCurrentA: 2 })` instead of calculating track width. Add temperature rise, power pads, or tap constraints only when known.
+- Use `priority: "critical"` only for nets whose failure or late routing can damage the design, such as verified oscillator, clock, reset, or sensitive feedback nets. Use `high` for important head-start routing and leave ordinary nets at `normal`.
+- Use `viaPreference: "avoid"` for short or sensitive nets where a planar route is strongly preferred. `forbid` is a prohibitive routing preference, not a replacement for a fabrication/DRC rule.
 - Use semantic impedance in `signalNet` or `diffPair` only with verified stack/reference information.
-- Use `matchedGroup`, differential skew limits, `plane`, `polygon`, `fanout`, and the appropriate `viaStitch` mode when required.
+- Use `matchedGroup`, differential skew limits, `plane`, `polygon`, and the appropriate `viaStitch` mode when required. Fanout is off by default; call `fanout(...)` only when the component or pad genuinely needs an explicit dense-package escape.
 - Use `drc(...)` and `netClass(...)` for real fabrication limits, not guessed geometry.
 
 Do not manually calculate track width, via diameter/drill, or impedance geometry when semantic intent can derive it. Use explicit geometry only when the user, fabricator, pad geometry, or a verified requirement provides it.
@@ -77,9 +79,11 @@ clearRouting({ nets: ["USB_D+", "USB_D-"], items: ["tracks", "vias"] });
 
 Do not add `clearRouting({ nets: "all" })` by habit. A separate clear tool is not part of this workflow.
 
-## Quality policy
+## Routing policy
 
-Normally omit `quality(...)`; the router defaults to `balanced`. If the profile must be explicit, prefer `quality({ profile: "balanced" })`. Omit `maxCandidates` unless a measured routing problem justifies a bounded retry. Do not use `completion-first` or `maxCandidates: 16` as a default template.
+There is one internally managed native KRT policy. Do not emit `quality(...)`, profile names, candidate counts, `maxVias`, or `paddingMm`; these are not part of the routing DSL. The router owns staged routing, bounded repairs, blocker recovery, and candidate grading.
+
+`priority` and `viaPreference` express board intent rather than selecting an engine profile. Successfully verified critical and special copper is protected from later stages. Short critical/avoid nets with unnecessary vias are eligible for a bounded planar reroute.
 
 ## Select one terminal
 
@@ -97,11 +101,11 @@ End every DSL file with exactly one terminal:
 2. Inspect only the nets, components, or PCB data needed to write correct intent.
 3. Write one complete DSL transaction and call `run_pcb_router_dsl({ file })`.
 4. If it returns `status: "running"`, call `wait_operation({ operation_id })` until terminal.
-5. Review diagnostics, metrics, apply result, and `native_verification`.
+5. Review status, diagnostics, metrics, apply result, and `native_verification`. A useful `partial` result is intentionally applied; incompleteness alone is not a reason to restore it.
 6. Use `inspect_net` for a reported or critical net. Render a focused `preview_pcb` only when visual copper evidence helps.
 7. Do not repeat native DRC immediately unless the router result is incomplete or the board changed afterward.
 8. If a successfully applied result has one clear local tool-generated violation, diagnose it and use one focused follow-up DSL repair without restoring the checkpoint. Recheck the changed result.
 9. If violations remain, decide whether to keep, repair, or restore. Keep only a non-blocking accepted condition; repair when the scope is safe and local; restore when the result clearly violates requirements, causes a broad regression, or safe repair would overwrite substantial user copper. Ask the user only when the acceptance requirement itself is unknown.
 10. After repair or restore, repeat current analysis and DRC, then report the decision and evidence.
 
-The routing apply step uses one EasyEDA checkpoint recovery boundary and restores automatically on an application exception. A successfully applied result with DRC violations remains applied until the agent chooses to keep, repair, or restore it after verification. EasyEDA currently applies through vias and copper zones without holes.
+The routing apply step uses one EasyEDA checkpoint recovery boundary and restores automatically on an application exception. A useful incomplete result remains applied, as does a successfully applied result with non-catastrophic DRC diagnostics, until the agent chooses to keep, repair, or restore it after verification. EasyEDA currently applies through vias and copper zones without holes.

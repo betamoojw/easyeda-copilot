@@ -53,7 +53,7 @@ const fixture = {
 const imported = adapter.importEasyEdaAutorouteJson(fixture);
 assert.ok(imported.board, JSON.stringify(imported.diagnostics));
 assert.equal(imported.diagnostics.filter(item => item.severity === 'error').length, 0);
-assert.deepEqual(imported.board.layers.map(item => item.name), ['F.Cu', 'B.Cu']);
+assert.deepEqual(imported.board.layers.map(item => item.name), ['TOP', 'BOTTOM']);
 assert.deepEqual(imported.board.components.map(item => item.designator), ['U1', 'J1']);
 assert.equal(imported.board.pads.length, 3, 'duplicate logical pad numbers are physical pads, not an error');
 assert.deepEqual(imported.board.pads.map(item => item.number), ['1', '1', '1']);
@@ -65,7 +65,7 @@ const fourLayerPadFixture = structuredClone(fixture);
 fourLayerPadFixture.footprints.tht.pads.p0.layers = [1, 2, 15, 16];
 const fourLayerPadImport = adapter.importEasyEdaAutorouteJson(fourLayerPadFixture);
 assert.ok(fourLayerPadImport.board, JSON.stringify(fourLayerPadImport.diagnostics));
-assert.deepEqual(fourLayerPadImport.board.layers.map(item => item.name), ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
+assert.deepEqual(fourLayerPadImport.board.layers.map(item => item.name), ['TOP', 'INNER_1', 'INNER_2', 'BOTTOM'],
     'through-hole pad layers must recover a multilayer stack omitted by EasyEDA autoroute layers');
 
 const fourLayerStackImport = adapter.importEasyEdaAutorouteJson(fixture, {
@@ -73,11 +73,12 @@ const fourLayerStackImport = adapter.importEasyEdaAutorouteJson(fixture, {
     copperLayerIds: [1, 15, 16, 2],
 });
 assert.ok(fourLayerStackImport.board, JSON.stringify(fourLayerStackImport.diagnostics));
-assert.deepEqual(fourLayerStackImport.board.layers.map(item => item.name), ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'],
+assert.deepEqual(fourLayerStackImport.board.layers.map(item => item.name), ['TOP', 'INNER_1', 'INNER_2', 'BOTTOM'],
     'authoritative EasyEDA stack metadata must augment an outer-only autoroute layer list');
 assert.deepEqual(imported.board.pads[2].shape, { kind: 'circle', diameterMm: 2.5 });
 assert.equal(imported.board.copper.editable.tracks.length, 0);
 assert.equal(imported.board.copper.fixed.tracks.length, 1);
+assert.equal(imported.board.copper.fixed.tracks[0].layer, 'TOP');
 assert.equal(imported.board.rules.nets[0].values.preferredTrackWidthMm, 0.25);
 assert.deepEqual(imported.board.rules.differentialPairs, [{ id: 'pair', positive: 'SIG', negative: 'SIG_N' }]);
 
@@ -105,9 +106,9 @@ assert.deepEqual(bottomImport.board.components, [
 assert.deepEqual(bottomImport.board.pads.map(item => ({
     id: item.id, number: item.number, net: item.net, at: item.at, layers: item.layers, shape: item.shape,
 })), [
-    { id: 'B1:p0', number: '2', net: 'SIG', at: { x: 0, y: -1 }, layers: ['B.Cu'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
-    { id: 'B1:p1', number: '1', net: 'SIG_N', at: { x: 2, y: -1 }, layers: ['B.Cu'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
-    { id: 'B1:p2', number: '3', net: 'GND', at: { x: 1, y: -3 }, layers: ['B.Cu'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
+    { id: 'B1:p0', number: '2', net: 'SIG', at: { x: 0, y: -1 }, layers: ['BOTTOM'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
+    { id: 'B1:p1', number: '1', net: 'SIG_N', at: { x: 2, y: -1 }, layers: ['BOTTOM'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
+    { id: 'B1:p2', number: '3', net: 'GND', at: { x: 1, y: -3 }, layers: ['BOTTOM'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
 ]);
 
 const curvedRegionFixture = structuredClone(fixture);
@@ -220,6 +221,30 @@ assert.equal(copperOnly.status, 'complete');
 assert.deepEqual(copperOnly.clearRouting, { tracks: ['SIG'] });
 assert.equal(copperOnly.copper.tracks.length, 0);
 
+const preferenceProgram = router.compileRoutingDsl(`
+    signalNet("SIG", { priority: "critical", viaPreference: "avoid" });
+    signalNet("SIG_N", { priority: "high" });
+    runRouting();
+`);
+const preferencePlan = router.resolveRoutePlan(imported.board, preferenceProgram, imported.board.rules);
+assert.deepEqual(
+    preferencePlan.netPolicies.filter(item => item.net === 'SIG' || item.net === 'SIG_N')
+        .map(item => [item.net, item.priority, item.viaPreference, item.protectOnSuccess]),
+    [
+        ['SIG', 'critical', 'avoid', true],
+        ['SIG_N', 'high', 'auto', false],
+    ],
+);
+assert.deepEqual(preferencePlan.fanout, { enabled: false, targets: [] },
+    'dense-package fanout must remain disabled until the DSL explicitly requests it');
+const explicitFanoutProgram = router.compileRoutingDsl(`fanout(component("U1")); runRouting();`);
+assert.equal(router.resolveRoutePlan(imported.board, explicitFanoutProgram, imported.board.rules).fanout.enabled, true);
+assert.throws(
+    () => router.compileRoutingDsl(`quality({ profile: "balanced" }); runRouting();`),
+    /quality is not defined/i,
+    'the EasyEDA host must expose the one-policy router rather than the removed quality DSL',
+);
+
 const plannedZone = await router.run({
     board: imported.board,
     dsl: `plane({
@@ -245,10 +270,10 @@ const application = adapter.routingResultToEasyEdaApplication({
     status: 'complete', operation: 'route',
     rules: imported.board.rules,
     copper: {
-        tracks: [{ net: 'SIG', layer: 'F.Cu', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
-        vias: [{ net: 'SIG', at: { x: 2, y: -3 }, diameterMm: 0.6, drillMm: 0.3, fromLayer: 'F.Cu', toLayer: 'B.Cu' }],
+        tracks: [{ net: 'SIG', layer: 'TOP', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
+        vias: [{ net: 'SIG', at: { x: 2, y: -3 }, diameterMm: 0.6, drillMm: 0.3, fromLayer: 'TOP', toLayer: 'BOTTOM' }],
         zones: [{
-            id: 'gnd-plane', net: 'SIG', layers: ['F.Cu'],
+            id: 'gnd-plane', net: 'SIG', layers: ['TOP'],
             outline: { outer: [{ x: -4, y: -4 }, { x: 4, y: -4 }, { x: 4, y: 4 }, { x: -4, y: 4 }] },
             priority: 2, minThicknessMm: 0.18, clearanceMm: 0.24,
             fill: { style: 'hatched', hatchOrientationDeg: 45 },
@@ -275,6 +300,18 @@ assert.deepEqual(application.zones[0], {
 });
 assert.deepEqual(application.diagnostics.map(item => item.code), ['EASYEDA_RESULT_ZONE_HATCH_APPROXIMATED']);
 
+const legacyKiCadLayerApplication = adapter.routingResultToEasyEdaApplication({
+    status: 'complete', operation: 'route', rules: imported.board.rules,
+    copper: {
+        tracks: [{ net: 'SIG', layer: 'F.Cu', widthMm: 0.2, points: [{ x: 1, y: -3 }, { x: 2, y: -3 }] }],
+        vias: [], zones: [],
+    },
+    diagnostics: [], metrics: { elapsedMs: 1 }, requiresNativeVerification: true,
+});
+assert.equal(legacyKiCadLayerApplication.tracks.length, 0);
+assert.equal(legacyKiCadLayerApplication.diagnostics[0].code, 'EASYEDA_RESULT_LAYER_UNSUPPORTED',
+    'KiCad layer names must not leak across the canonical router/host boundary');
+
 const stackupApplication = adapter.routingResultToEasyEdaApplication({
     status: 'complete', operation: 'apply-stackup',
     rules: imported.board.rules,
@@ -282,9 +319,9 @@ const stackupApplication = adapter.routingResultToEasyEdaApplication({
         applyRequested: true,
         effective: {
             layers: [
-                { kind: 'copper', layer: 'F.Cu', thicknessMm: 0.035 },
+                { kind: 'copper', layer: 'TOP', thicknessMm: 0.035 },
                 { kind: 'dielectric', name: 'Core', thicknessMm: 1.5, relativePermittivity: 4.2 },
-                { kind: 'copper', layer: 'B.Cu', thicknessMm: 0.035 },
+                { kind: 'copper', layer: 'BOTTOM', thicknessMm: 0.035 },
             ],
         },
     },
@@ -301,11 +338,11 @@ const invalidStackupApplication = adapter.routingResultToEasyEdaApplication({
         applyRequested: true,
         effective: {
             layers: [
-                { kind: 'copper', layer: 'F.Cu', thicknessMm: 0.035 },
+                { kind: 'copper', layer: 'TOP', thicknessMm: 0.035 },
                 { kind: 'dielectric', name: 'Core 1', thicknessMm: 0.7 },
-                { kind: 'copper', layer: 'In1.Cu', thicknessMm: 0.035 },
+                { kind: 'copper', layer: 'INNER_1', thicknessMm: 0.035 },
                 { kind: 'dielectric', name: 'Core 2', thicknessMm: 0.7 },
-                { kind: 'copper', layer: 'B.Cu', thicknessMm: 0.035 },
+                { kind: 'copper', layer: 'BOTTOM', thicknessMm: 0.035 },
             ],
         },
     },
