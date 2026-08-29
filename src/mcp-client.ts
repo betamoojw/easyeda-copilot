@@ -45,8 +45,10 @@ const MCP_DEADLINE_FIELD = '__easyedaCopilotDeadlineAt';
 const MCP_SCAN_TIMER_ID = 'easyeda-copilot-mcp-scan';
 const MCP_HEARTBEAT_TIMER_ID = 'easyeda-copilot-mcp-heartbeat';
 const MCP_CONNECT_TIMEOUT_TIMER_ID = 'easyeda-copilot-mcp-connect-timeout';
+const RETAINED_ROUTING_APPLICATIONS = 20;
 
 const mcpCommandQueue = new PQueue({ concurrency: 1 });
+const routingApplicationCache = new Map<string, Promise<unknown>>();
 
 type McpClientState = {
     instanceId: string;
@@ -1406,51 +1408,70 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
         }
 
         if (message.event === 'apply-routing-result') {
-            const bundle = body.bundle;
-            const application = readRoutingApplication(body.application);
-            if (bundle !== undefined) assertDrcBundle(bundle);
+            const operationId = typeof body.operationId === 'string' ? body.operationId : undefined;
+            let applicationTask = operationId ? routingApplicationCache.get(operationId) : undefined;
+            if (!applicationTask) {
+                applicationTask = (async () => {
+                    const bundle = body.bundle;
+                    const application = readRoutingApplication(body.application);
+                    if (bundle !== undefined) assertDrcBundle(bundle);
 
-            // DRC, selective copper deletion, new geometry, refill, and native
-            // verification share one recovery boundary.
-            const checkpointId = await checkpointer.save(false);
-            if (!checkpointId) throw new Error('Failed to create routing transaction checkpoint.');
+                    // DRC, selective copper deletion, new geometry, refill, and native
+                    // verification share one recovery boundary.
+                    const checkpointId = await checkpointer.save(false);
+                    if (!checkpointId) throw new Error('Failed to create routing transaction checkpoint.');
+                    try {
+                        const rules = bundle === undefined ? undefined : await routingTransactionStep(
+                            'DRC rule application',
+                            () => applyPcbDrcRules(bundle),
+                        );
+                        const hasBoardMutation = Boolean(
+                            application.copperLayerCount !== undefined
+                            || application.clearRouting
+                            || application.tracks.length
+                            || application.vias.length
+                            || application.zones.length,
+                        );
+                        const copper = hasBoardMutation
+                            ? await routingTransactionStep(
+                                'board application',
+                                () => applyRoutingCopper(application),
+                            )
+                            : undefined;
+                        const drc = await routingTransactionStep(
+                            'native DRC verification',
+                            () => checkPcbDrc(100),
+                        );
+                        const violationCount = drc.reduce((categoryTotal, category) => (
+                            categoryTotal + category.list.reduce((groupTotal, group) => groupTotal + group.list.length, 0)
+                        ), 0);
+                        return {
+                            applied: true,
+                            rules,
+                            copper,
+                            nativeVerification: violationCount ? 'failed' : 'passed',
+                            violationCount,
+                            drc,
+                        };
+                    } catch (error) {
+                        const restored = await checkpointer.restore(checkpointId, true).catch(() => false);
+                        const message = error instanceof Error ? error.message : String(error);
+                        throw new Error(restored ? `${message}; routing transaction rolled back` : `${message}; routing rollback failed`);
+                    }
+                })();
+                if (operationId) routingApplicationCache.set(operationId, applicationTask);
+            }
             try {
-                const rules = bundle === undefined ? undefined : await routingTransactionStep(
-                    'DRC rule application',
-                    () => applyPcbDrcRules(bundle),
-                );
-                const hasBoardMutation = Boolean(
-                    application.copperLayerCount !== undefined
-                    || application.clearRouting
-                    || application.tracks.length
-                    || application.vias.length
-                    || application.zones.length,
-                );
-                const copper = hasBoardMutation
-                    ? await routingTransactionStep(
-                        'board application',
-                        () => applyRoutingCopper(application),
-                    )
-                    : undefined;
-                const drc = await routingTransactionStep(
-                    'native DRC verification',
-                    () => checkPcbDrc(100),
-                );
-                const violationCount = drc.reduce((categoryTotal, category) => (
-                    categoryTotal + category.list.reduce((groupTotal, group) => groupTotal + group.list.length, 0)
-                ), 0);
-                reply(true, {
-                    applied: true,
-                    rules,
-                    copper,
-                    nativeVerification: violationCount ? 'failed' : 'passed',
-                    violationCount,
-                    drc,
-                });
+                const result = await applicationTask;
+                reply(true, result);
+                while (routingApplicationCache.size > RETAINED_ROUTING_APPLICATIONS) {
+                    routingApplicationCache.delete(routingApplicationCache.keys().next().value!);
+                }
             } catch (error) {
-                const restored = await checkpointer.restore(checkpointId, true).catch(() => false);
-                const message = error instanceof Error ? error.message : String(error);
-                throw new Error(restored ? `${message}; routing transaction rolled back` : `${message}; routing rollback failed`);
+                if (operationId && routingApplicationCache.get(operationId) === applicationTask) {
+                    routingApplicationCache.delete(operationId);
+                }
+                throw error;
             }
             return;
         }

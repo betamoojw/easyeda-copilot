@@ -31,7 +31,7 @@ Complete only the stage requested by the user. A schematic task does not authori
 - After `import_pcb_changes`, stop and ask the user to confirm the EasyEDA import dialog. Do not continue until the user says it is complete.
 - Open the target PCB before `make_pcb_layout`; this supplies its outline and component positions to `preserve(...)`.
 - Placement preview is not applied. Assemble only a completed final `layoutId`, after user approval.
-- Long placement and routing calls are complete only after `wait_operation` returns a terminal result.
+- Long placement and routing calls are complete only after `wait_operation` returns a terminal result. If calculation finished but applying its saved in-memory result failed, retry it with `apply_operation` instead of rerunning the calculation.
 - Existing PCB copper and objects are preserved by placement assembly. Existing routing is preserved by the router unless `clearRouting(...)` explicitly selects copper to replace.
 - For stack-dependent routing intent, use verified physical data, declare and report a reasonable provisional stack, or ask for the missing data. Do not silently omit the semantic constraint.
 - After verification, decide whether to keep, repair, or restore the agent-applied result. Prefer a focused repair for a local error; restore a clearly invalid or broadly regressed result that cannot be repaired safely. Do not restore for a warning alone, and report the decision.

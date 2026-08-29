@@ -60,4 +60,45 @@ assert.equal(preStartRunnerCalled, false);
 
 await assert.rejects(() => manager.wait('pcb-dsl:00000000', 1), /not found/i);
 
+let applyAttempts = 0;
+const retryableId = manager.start('pcb-dsl', async ({ setApplyHandler }) => {
+    setApplyHandler(async () => {
+        applyAttempts++;
+        if (applyAttempts === 1) throw new Error('connection lost');
+        return { applied: true };
+    });
+    return { prepared: true };
+});
+await manager.wait(retryableId, 1000);
+await assert.rejects(() => manager.apply(retryableId), /connection lost/i);
+const retriedApply = await manager.apply(retryableId);
+assert.equal(retriedApply.status, 'applied');
+assert.deepEqual(retriedApply.apply_result, { applied: true });
+const duplicateApply = await manager.apply(retryableId);
+assert.equal(duplicateApply.status, 'already_applied');
+assert.equal(applyAttempts, 2);
+
+await assert.rejects(() => manager.apply(completedId), /no saved result/i);
+
+let rejectHungApply;
+let markHungApplyStarted;
+const hungApplyStarted = new Promise(resolvePromise => { markHungApplyStarted = resolvePromise; });
+let hungApplyAttempts = 0;
+const hungApplyId = manager.start('pcb-dsl', async ({ setApplyHandler, applyResult }) => {
+    setApplyHandler(async () => {
+        hungApplyAttempts++;
+        if (hungApplyAttempts === 1) {
+            markHungApplyStarted();
+            return new Promise((_, reject) => { rejectHungApply = reject; });
+        }
+        return { applied: true };
+    });
+    return applyResult();
+});
+await hungApplyStarted;
+assert.equal((await manager.apply(hungApplyId)).status, 'applied');
+rejectHungApply(new Error('stale connection failed'));
+assert.deepEqual(await manager.wait(hungApplyId, 1000), { applied: true });
+assert.equal(hungApplyAttempts, 2);
+
 process.stdout.write('Operation manager: ok\n');

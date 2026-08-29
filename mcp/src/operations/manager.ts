@@ -2,6 +2,8 @@ import { createOperationId, parseOperationId, type OperationKind } from './id';
 
 type OperationStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 type CancelHandler = () => void | Promise<void>;
+type ApplyHandler = () => Promise<unknown>;
+type ApplyStatus = 'pending' | 'applying' | 'applied' | 'failed';
 
 export type OperationContext = Readonly<{
     id: string;
@@ -9,6 +11,8 @@ export type OperationContext = Readonly<{
     setStage(stage: string): void;
     setProgress(progress: unknown): void;
     onCancel(handler: CancelHandler): void;
+    setApplyHandler(handler: ApplyHandler): void;
+    applyResult(): Promise<unknown>;
 }>;
 
 type ManagedOperation = {
@@ -20,6 +24,10 @@ type ManagedOperation = {
     progress?: unknown;
     controller: AbortController;
     cancelHandler?: CancelHandler;
+    applyHandler?: ApplyHandler;
+    applyStatus?: ApplyStatus;
+    applyResult?: unknown;
+    applyError?: string;
     result?: unknown;
     error?: string;
     createdAt: number;
@@ -90,6 +98,13 @@ export class OperationManager {
                 operation.cancelHandler = handler;
                 if (controller.signal.aborted) void Promise.resolve(handler()).catch(console.error);
             },
+            setApplyHandler: handler => {
+                operation.applyHandler = handler;
+                operation.applyStatus = 'pending';
+                operation.applyResult = undefined;
+                operation.applyError = undefined;
+            },
+            applyResult: () => this.#apply(operation),
         };
 
         void Promise.resolve().then(() => {
@@ -137,7 +152,9 @@ export class OperationManager {
             };
         }
         if (operation.status === 'failed' || operation.status === 'cancelled') {
-            throw new Error(operation.error || `${operation.kind} operation ${operation.status}`);
+            throw new Error(
+                `${operation.error || `${operation.kind} operation ${operation.status}`} (operation_id: ${operation.id})`,
+            );
         }
         return {
             status: 'running' as const,
@@ -169,6 +186,44 @@ export class OperationManager {
             operation_id: operationId,
             ...(cancellationError ? { cancellation_error: cancellationError } : {}),
         };
+    }
+
+    async apply(operationId: string) {
+        parseOperationId(operationId);
+        const operation = this.#operations.get(operationId);
+        if (!operation) throw new Error(`Operation not found: ${operationId}`);
+        if (!operation.applyHandler) {
+            throw new Error(`Operation has no saved result to apply: ${operationId}`);
+        }
+
+        const alreadyApplied = operation.applyStatus === 'applied';
+        const result = await this.#apply(operation);
+        return {
+            status: alreadyApplied ? 'already_applied' as const : 'applied' as const,
+            operation_id: operationId,
+            apply_result: result,
+        };
+    }
+
+    async #apply(operation: ManagedOperation) {
+        if (!operation.applyHandler) {
+            throw new Error(`Operation has no saved result to apply: ${operation.id}`);
+        }
+        if (operation.applyStatus === 'applied') return operation.applyResult;
+
+        operation.applyStatus = 'applying';
+        operation.applyError = undefined;
+        try {
+            const result = await operation.applyHandler();
+            operation.applyResult = result;
+            operation.applyStatus = 'applied';
+            return result;
+        } catch (error) {
+            if (operation.applyStatus === 'applied') return operation.applyResult;
+            operation.applyStatus = 'failed';
+            operation.applyError = errorMessage(error);
+            throw error;
+        }
     }
 
     #trim() {

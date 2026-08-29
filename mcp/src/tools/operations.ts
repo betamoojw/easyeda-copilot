@@ -35,4 +35,14 @@ export function registerOperationTools(server: McpServer) {
         },
         async ({ operation_id }) => textResult(await operationManager.cancel(operation_id)),
     );
+
+    server.registerTool(
+        'apply_operation',
+        {
+            title: 'Apply Operation',
+            description: 'Retry applying a prepared in-memory operation result without running the operation again.',
+            inputSchema: z.object({ operation_id: operationId }),
+        },
+        async ({ operation_id }) => textResult(await operationManager.apply(operation_id)),
+    );
 }

@@ -161,13 +161,18 @@ async function executeRoutingOperation(
     context.signal.throwIfAborted();
 
     context.setStage('applying');
-    const applied = record(await bridge.requestEasyEda('apply-routing-result', {
-        application,
-        ...(bundle ? { bundle } : {}),
-    }, 300_000));
-    if (!applied || applied.applied !== true) {
-        throw new Error('EasyEDA did not confirm the routing transaction.');
-    }
+    context.setApplyHandler(async () => {
+        const applied = record(await bridge.requestEasyEda('apply-routing-result', {
+            operationId: context.id,
+            application,
+            ...(bundle ? { bundle } : {}),
+        }, 300_000));
+        if (!applied || applied.applied !== true) {
+            throw new Error('EasyEDA did not confirm the routing transaction.');
+        }
+        return applied;
+    });
+    const applied = record(await context.applyResult());
 
     return {
         status: result.status,

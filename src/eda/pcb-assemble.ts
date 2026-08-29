@@ -888,18 +888,19 @@ async function drawRoutingZones(zones: RoutingCopperApplication['zones']) {
     return pending;
 }
 
-async function rebuildRoutingZones(pending: Awaited<ReturnType<typeof drawRoutingZones>>) {
+async function rebuildAllRoutingZones() {
     const warnings: string[] = [];
     let rebuilt = 0;
-    for (const item of pending) {
+    const pours = await eda.pcb_PrimitivePour.getAll();
+    for (const pour of pours) {
         await yieldToEventLoop();
-        const primitiveId = item.pour.getState_PrimitiveId();
+        const primitiveId = pour.getState_PrimitiveId();
         const hydrated = primitiveId
             ? await eda.pcb_PrimitivePour.get(primitiveId).catch(() => undefined)
             : undefined;
-        const candidates = hydrated && hydrated !== item.pour
-            ? [hydrated, item.pour]
-            : [hydrated ?? item.pour];
+        const candidates = hydrated && hydrated !== pour
+            ? [hydrated, pour]
+            : [hydrated ?? pour];
         let lastError = '';
         let poured: IPCB_PrimitivePoured | undefined;
         for (const candidate of candidates) {
@@ -914,7 +915,9 @@ async function rebuildRoutingZones(pending: Awaited<ReturnType<typeof drawRoutin
         if (poured) {
             rebuilt++;
         } else {
-            warnings.push(`${item.zoneLabel} layer ${item.layerValue}: ${lastError || 'unknown rebuild error'}`);
+            warnings.push(
+                `${pour.getState_PourName() || primitiveId || pour.getState_Net()} layer ${pour.getState_Layer()}: ${lastError || 'unknown rebuild error'}`,
+            );
         }
     }
     if (warnings.length) {
@@ -967,9 +970,9 @@ export async function applyRoutingCopper(application: RoutingCopperApplication) 
     }) : undefined;
     await routingApplicationStep('track creation', () => drawRoutingTracks(application.tracks));
     await routingApplicationStep('via creation', () => drawRoutingVias(application.vias));
-    const pendingZones = await routingApplicationStep('zone creation', () => drawRoutingZones(application.zones));
+    await routingApplicationStep('zone creation', () => drawRoutingZones(application.zones));
     await routingApplicationStep('ratline refresh', () => refreshPcbState(true));
-    const zoneRebuild = await routingApplicationStep('zone rebuild', () => rebuildRoutingZones(pendingZones));
+    const zoneRebuild = await routingApplicationStep('zone rebuild', () => rebuildAllRoutingZones());
     return {
         applied: true,
         copperLayerCount,
