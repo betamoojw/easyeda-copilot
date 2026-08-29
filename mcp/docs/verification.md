@@ -19,7 +19,7 @@ Use only the checks relevant to the requested stage. A successful generator resp
 
 ## Copper and routing
 
-- Review router diagnostics, metrics, apply result, and `native_verification`.
+- Review the compact routing, copper, diagnostics, and `drc` summary. Use `check_pcb_drc` when violation details are needed.
 - Use `inspect_net` for a reported or critical net instead of inspecting every net.
 - Do not immediately repeat `check_pcb_drc` when the router already returned current native DRC. Repeat it after later editor changes or when the returned result is incomplete.
 - A DRC finding does not automatically require rollback and does not freeze the applied board. Repair one clear local tool-generated error with a focused follow-up transaction, then check the changed result.

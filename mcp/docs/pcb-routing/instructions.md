@@ -123,7 +123,7 @@ End every DSL file with exactly one terminal:
 2. Inspect only the nets, components, or PCB data needed to write correct intent.
 3. Write one complete DSL transaction and call `run_pcb_router_dsl({ file })`.
 4. If it returns `status: "running"`, call `wait_operation({ operation_id })` until terminal.
-5. Review status, diagnostics, metrics, apply result, and `native_verification`. A useful `partial` result is intentionally applied; incompleteness alone is not a reason to restore it.
+5. Review the compact routing, copper, diagnostics, and `drc` summary. Use `check_pcb_drc` when violation details are needed. A useful `partial` result is intentionally applied; incompleteness alone is not a reason to restore it.
 6. Use `inspect_net` for a reported or critical net. Render a focused `preview_pcb` only when visual copper evidence helps.
 7. Do not repeat native DRC immediately unless the router result is incomplete or the board changed afterward.
 8. If a successfully applied result has one clear local tool-generated violation, diagnose it and use one focused follow-up DSL repair without restoring the checkpoint. Recheck the changed result.

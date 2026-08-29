@@ -965,6 +965,30 @@ async function saveCurrentDocument(document: IDMT_EditorDocumentItem) {
     return saveActiveDocument(document.documentType);
 }
 
+async function syncCurrentDocument(settleMs = 500) {
+    const document = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+    if (!document) throw new Error('Current document info not found');
+
+    const saved = await saveCurrentDocument(document);
+    if (!saved) throw new Error(`Failed to save current document: ${document.uuid}`);
+
+    const closed = await eda.dmt_EditorControl.closeDocument(document.tabId || document.uuid);
+    if (!closed) throw new Error(`Failed to close current document: ${document.uuid}`);
+
+    await delay(settleMs);
+    const tabId = await eda.dmt_EditorControl.openDocument(document.uuid);
+    if (!tabId) throw new Error(`Failed to reopen current document: ${document.uuid}`);
+    await delay(settleMs);
+
+    return {
+        document_uuid: document.uuid,
+        document_type: document.documentType,
+        saved,
+        closed,
+        settle_ms: settleMs,
+    };
+}
+
 function getOpenEditorTabs(tree: IDMT_EditorSplitScreenItem | undefined): IDMT_EditorTabItem[] {
     if (!tree) return [];
     return [
@@ -1438,20 +1462,21 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
                                 () => applyRoutingCopper(application),
                             )
                             : undefined;
+                        await routingTransactionStep(
+                            'document synchronization',
+                            () => syncCurrentDocument(),
+                        );
                         const drc = await routingTransactionStep(
                             'native DRC verification',
-                            () => checkPcbDrc(100),
+                            () => checkPcbDrc(1),
                         );
-                        const violationCount = drc.reduce((categoryTotal, category) => (
-                            categoryTotal + category.list.reduce((groupTotal, group) => groupTotal + group.list.length, 0)
-                        ), 0);
+                        const hasViolations = drc.some(category => category.list.some(group => group.list.length));
                         return {
                             applied: true,
-                            rules,
-                            copper,
-                            nativeVerification: violationCount ? 'failed' : 'passed',
-                            violationCount,
-                            drc,
+                            rulesApplied: Boolean(rules),
+                            boardApplied: Boolean(copper),
+                            ...(copper?.zoneRebuild ? { pours: copper.zoneRebuild } : {}),
+                            nativeVerification: hasViolations ? 'failed' : 'passed',
                         };
                     } catch (error) {
                         const restored = await checkpointer.restore(checkpointId, true).catch(() => false);
@@ -1582,27 +1607,7 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
             const settleMs = typeof body.settleMs === 'number' && Number.isFinite(body.settleMs)
                 ? Math.max(0, body.settleMs)
                 : 500;
-            const document = await eda.dmt_SelectControl.getCurrentDocumentInfo();
-            if (!document) throw new Error('Current document info not found');
-
-            const saved = await saveCurrentDocument(document);
-            if (!saved) throw new Error(`Failed to save current document: ${document.uuid}`);
-
-            const closed = await eda.dmt_EditorControl.closeDocument(document.tabId || document.uuid);
-            if (!closed) throw new Error(`Failed to close current document: ${document.uuid}`);
-
-            await delay(settleMs);
-
-            const tabId = await eda.dmt_EditorControl.openDocument(document.uuid);
-            if (!tabId) throw new Error(`Failed to reopen current document: ${document.uuid}`);
-
-            reply(true, {
-                document_uuid: document.uuid,
-                document_type: document.documentType,
-                saved,
-                closed,
-                settle_ms: settleMs,
-            });
+            reply(true, await syncCurrentDocument(settleMs));
             return;
         }
 

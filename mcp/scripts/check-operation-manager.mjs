@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const { OperationManager } = await import(
     pathToFileURL(resolve('dist/operations/manager.js')).href
 );
-const { routingResultBlocksApplication } = await import(
+const { compactRoutingDiagnostics, routingResultBlocksApplication } = await import(
     pathToFileURL(resolve('dist/routing/routing-operation.js')).href
 );
 
@@ -13,6 +13,20 @@ assert.equal(routingResultBlocksApplication({ status: 'complete' }), false);
 assert.equal(routingResultBlocksApplication({ status: 'partial' }), false,
     'partial copper must reach the EasyEDA apply transaction');
 assert.equal(routingResultBlocksApplication({ status: 'error' }), true);
+
+const compactDiagnostics = compactRoutingDiagnostics([
+    { code: 'INFO', severity: 'info', message: 'omit me', details: { large: true } },
+    ...Array.from({ length: 25 }, (_, index) => ({
+        code: `WARN_${index}`,
+        severity: 'warning',
+        message: `warning ${index}`,
+        path: `nets.${index}`,
+        details: { large: true },
+    })),
+]);
+assert.equal(compactDiagnostics.diagnostics.length, 20);
+assert.equal(compactDiagnostics.omitted, 5);
+assert.deepEqual(Object.keys(compactDiagnostics.diagnostics[0]), ['code', 'message', 'path']);
 
 const manager = new OperationManager();
 const completedId = manager.start('pcb-dsl', async ({ id }) => ({ ok: true, operation_id: id }));

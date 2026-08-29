@@ -24,6 +24,7 @@ import {
 
 const PCB_DOCUMENT_RESOURCE = 'current-pcb-document';
 const ROUTER_TIMEOUT_MS = 60 * 60 * 1000;
+const ROUTING_DIAGNOSTIC_LIMIT = 20;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -42,6 +43,22 @@ function diagnosticsMessage(diagnostics: readonly RoutingDiagnostic[]) {
 
 function adapterErrors(result: RoutingResult, diagnostics: readonly RoutingDiagnostic[]) {
     return diagnostics.slice(result.diagnostics.length).filter(item => item.severity === 'error');
+}
+
+export function compactRoutingDiagnostics(diagnostics: readonly RoutingDiagnostic[]) {
+    const relevant = diagnostics.filter(item => item.severity === 'warning' || item.severity === 'error');
+    const unique = [...new Map(relevant.map(item => [
+        `${item.code}\u0000${item.message}\u0000${item.path ?? ''}`,
+        {
+            code: item.code,
+            message: item.message,
+            ...(item.path ? { path: item.path } : {}),
+        },
+    ])).values()];
+    return {
+        diagnostics: unique.slice(0, ROUTING_DIAGNOSTIC_LIMIT),
+        omitted: Math.max(0, unique.length - ROUTING_DIAGNOSTIC_LIMIT),
+    };
 }
 
 /** Partial routing carries applicable copper; only a terminal router failure blocks the transaction. */
@@ -173,19 +190,39 @@ async function executeRoutingOperation(
         return applied;
     });
     const applied = record(await context.applyResult());
+    const diagnosticSummary = compactRoutingDiagnostics(application.diagnostics);
+    const openNetNames = result.metrics.openNets ?? [];
+    const visibleOpenNetNames = openNetNames.slice(0, ROUTING_DIAGNOSTIC_LIMIT);
+    const pours = record(applied?.pours);
 
     return {
         status: result.status,
         operation: result.operation,
         operation_id: context.id,
-        tracks: application.tracks.length,
-        vias: application.vias.length,
-        zones: application.zones.length,
-        native_verification: applied?.nativeVerification ?? 'not-run',
-        diagnostics: application.diagnostics,
-        metrics: result.metrics,
+        applied: applied?.applied === true,
+        copper: {
+            tracks: application.tracks.length,
+            vias: application.vias.length,
+            zones: application.zones.length,
+            ...(typeof pours?.rebuilt === 'number' ? { pours_rebuilt: pours.rebuilt } : {}),
+            ...(typeof pours?.pending === 'number' ? { pours_pending: pours.pending } : {}),
+        },
+        routing: {
+            ...(result.metrics.routedNetCount === undefined ? {} : { routed_nets: result.metrics.routedNetCount }),
+            ...(result.metrics.openNetCount === undefined ? {} : { open_nets: result.metrics.openNetCount }),
+            ...(visibleOpenNetNames.length ? { open_net_names: visibleOpenNetNames } : {}),
+            ...(openNetNames.length > visibleOpenNetNames.length
+                ? { open_net_names_omitted: openNetNames.length - visibleOpenNetNames.length }
+                : {}),
+            ...(result.metrics.trackLengthMm === undefined
+                ? {}
+                : { track_length_mm: Math.round(result.metrics.trackLengthMm * 1000) / 1000 }),
+            elapsed_ms: Math.round(result.metrics.elapsedMs),
+        },
+        drc: applied?.nativeVerification ?? 'not-run',
+        ...(diagnosticSummary.diagnostics.length ? { diagnostics: diagnosticSummary.diagnostics } : {}),
+        ...(diagnosticSummary.omitted ? { diagnostics_omitted: diagnosticSummary.omitted } : {}),
         artifacts_directory: artifactsDirectory,
-        apply_result: applied,
     };
 }
 
