@@ -23,13 +23,28 @@ Read `dsl.ts` as the exact syntax source. The files in `examples/` are patterns,
 
 Every placement DSL for an existing PCB must contain one `preserve(...)` declaration matching the selected mode. Keep it in the complete DSL used for mechanical preview, final placement, and any later placement repair. Omit it only for an intentional new-board or full re-placement result.
 
+## Electrical and routing preflight
+
+Placement and routing are one coupled physical problem. Do not write placement DSL until the component-to-net topology has been reviewed and there is a plausible way to route the proposed placement. Routing cannot rescue a placement that blocks its only signal, power, return, escape, or thermal paths.
+
+1. Inspect the complete connectivity once. Reuse complete schematic context when available; otherwise use one `get_current_pcb` snapshot after import. If only pin function is ambiguous, read the relevant schematic page. Do not call `inspect_net` for every net.
+2. Trace logical paths through series resistors, AC-coupling capacitors, ferrite beads, common-mode chokes, zero-ohm links, and matching networks. A net-name boundary at a series component does not end the logical signal. Continue only through its series channel; do not treat a shunt capacitor or ESD branch as path continuation.
+3. Review every component and connected net. Classify mechanics, critical signal paths, power paths and current loops, thermal candidates, and ordinary connectivity. Ordinary nets need no DSL constraint, but they still count as reviewed.
+4. Choose a provisional routing strategy before density: intended copper-layer roles, reference/return planes, supported via technology, dense-package escape directions, and which layers may pass under components. This is planning only; placement does not authorize changing stackup or routing.
+5. Reserve continuous capacity for each important flow: both legs and every series segment of a differential pair, RF/clock paths, high-current copper, switch/decoupling loops, return paths, connector escapes, via fields, and thermal spreading. Keep critical loops short without packing them so tightly that their required copper cannot fit.
+6. Then choose board size, density, component sides, rotations, blocks, and constraints. High density and `compactness: "high"` are valid for a topology and layer/via strategy that can support them; low density alone does not guarantee routability.
+
+For each power IC, regulator, MOSFET, driver, high-power LED/resistor, and exposed pad, explicitly decide whether it needs `primitive.thermalPad(...)`, external copper/via space to be implemented during routing, or no thermal action. Base the decision on the datasheet and credible dissipation assumptions; do not silently omit the thermal review.
+
+Use the topology analysis selectively. One critical ordered chain may justify `signalPath`; one isolated dominant hop may justify `criticalPair`. Do not convert every reviewed connection into a placement constraint.
+
 ## Run
 
-1. Define the board, holes, blocks, components, and only justified constraints in one complete placement DSL file.
+1. Define the board, holes, blocks, components, and only preflight-justified constraints in one complete placement DSL file.
 2. If mechanics changed, read `mechanical-validation.md` and run a focused mechanical preview with `solver({ preview: true, placeOnlyComponents: [...] })`.
 3. Call `make_pcb_layout({ file })`. If it returns `status: "running"`, call `wait_operation({ operation_id })` until terminal.
-4. Inspect `previewSvgPath` and solver diagnostics. If a `post_place_opportunity` suggests `refineGroup`, add it only when that exact swap or rotation is allowed. A preview result is never assembled.
-5. Fix hard errors and one obvious in-scope visual problem; do not chase zero warnings.
+4. Inspect `previewSvgPath` and solver diagnostics. Confirm that critical logical paths remain ordered, dense packages have escape directions, and planned signal, power, via, and thermal areas are not blocked. If a `post_place_opportunity` suggests `refineGroup`, add it only when that exact swap or rotation is allowed. A preview result is never assembled.
+5. Reject a placement with no plausible route for an important path. Fix hard errors and one obvious in-scope visual problem; do not chase zero warnings.
 6. Show the preview and ask for user approval.
 7. Remove preview filters when full placement is requested, run the complete DSL, wait when needed, and inspect the final preview.
 8. Ask for final placement approval.
@@ -58,7 +73,7 @@ Assembly preserves existing copper and board objects. It replaces the existing o
 
 Current examples:
 
-- `examples/esp32c3-devboard.js`: edge mechanics, power clusters, two USB signal paths, and a diagnostic-justified refinement group.
+- `examples/esp32c3-devboard.js`: edge mechanics, power clusters, both USB differential legs continued across protection and series resistors, and a diagnostic-justified refinement group.
 - `examples/rf-amplifier.js`: a straight critical RF path between edge-mounted connectors and a separate power section.
 
 Example for one critical RF chain:
@@ -91,9 +106,9 @@ refineGroup("headers", ["H1", "H2"], { swap: true, rotateBy: [180] });
 
 ## Starting values
 
-Use `board.auto(...)` unless dimensions are mechanically fixed. For an ordinary compact board, useful starting values are density `0.4`, component clearance `0.25-0.5 mm`, and grid `0.5` or `1 mm`. Footprint geometry and mechanics take priority.
+Use `board.auto(...)` unless dimensions are mechanically fixed. For an ordinary board without stronger topology evidence, useful starting values are density `0.4`, component clearance `0.25-0.5 mm`, and grid `0.5` or `1 mm`. Footprint geometry, mechanics, and routing feasibility take priority.
 
-`clearance` includes body and silkscreen bounds and defaults to `0.35 mm`. For `capCluster`, a starting gap of `0.25-0.4 mm` is usually appropriate. Use `compactness: "high"` only when area is genuinely constrained.
+`clearance` includes body and silkscreen bounds and defaults to `0.35 mm`. For `capCluster`, a starting gap of `0.25-0.4 mm` is usually appropriate. Choose compactness from the topology and intended routing technology, not from a blanket preference for sparse or dense placement.
 
 ## Result handling
 

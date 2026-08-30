@@ -2,7 +2,7 @@
 
 Use `run_pcb_router_dsl` after opening the exact target EasyEDA PCB. Read the local `dsl.ts` as the exact syntax source before writing DSL. Do not invent helpers or example directories. The path reported by the tool identifies the installed upstream copy; read it only when diagnosing a version mismatch.
 
-This workflow can run independently of placement.
+This workflow may start from an existing placement, but placement and routing are one coupled physical problem. Before full routing, verify that the placement offers plausible critical-signal, power, return, dense-package escape, via, and thermal paths under the intended stack. A routing-only request does not authorize moving components: when placement is the root cause, report the exact bottleneck or return to the placement workflow only when the requested scope allows it. Do not conceal a bad placement with repeated routing attempts.
 
 ## Default: one complete transaction
 
@@ -35,6 +35,22 @@ plane({
 
 One `plane(...)` declaration is one logical zone, so `zones: 1` or `planeZones: 1` does not mean one physical layer. EasyEDA creates one pour on every selected layer.
 
+## Board-wide GND stitching
+
+When GND copper on multiple layers should be stitched across the board, do not make the grid sparse merely to reduce the via count. For board-wide `viaStitch({ mode: "grid", ... })`, use `pitchMm: 3` as the normal starting point; `2 mm` is a useful denser choice and `4 mm` is a relaxed ordinary choice. A pitch above `4 mm` is normally too sparse and needs a board-, fabrication-, or routing-specific reason.
+
+The same guidance applies to `plane(...).stitching.gridMm`. When choosing between two otherwise valid pitches and the user gave no requirement, prefer the smaller value if DRC, pad clearance, and required routing corridors still permit it. Do not avoid a `2-4 mm` GND grid solely because it creates many stitching vias.
+
+```js
+viaStitch("GND_GRID", {
+  mode: "grid",
+  net: "GND",
+  region: board(),
+  pitchMm: 3,
+  via: "drc-min",
+});
+```
+
 ## Fanout is a retry
 
 Do not call `fanout(...)` in the first routing attempt unless the user explicitly requires it. Let normal routing escape the package first. Add fanout only when the no-fanout result shows an escape problem at a dense QFN/QFP or specific pad.
@@ -51,6 +67,8 @@ Let the router derive geometry from the effective rules and declared physical as
 - Use semantic impedance in `signalNet` or `diffPair` only with verified stack/reference information.
 - Use `matchedGroup`, differential skew limits, `plane`, `polygon`, and the appropriate `viaStitch` mode when required.
 - Use `drc(...)` and `netClass(...)` for real fabrication limits, not guessed geometry.
+
+A logical high-speed or differential path may cross series resistors, AC-coupling capacitors, ferrite beads, or common-mode chokes and therefore use different physical net names on each side. Trace the complete logical path and apply the appropriate intent to every routed segment; a net-name boundary does not make the downstream segment ordinary. Do not extend the path through shunt or protection branches.
 
 Do not manually calculate track width, via diameter/drill, or impedance geometry when semantic intent can derive it. Use explicit geometry only when the user, fabricator, pad geometry, or a verified requirement provides it.
 
@@ -120,13 +138,13 @@ End every DSL file with exactly one terminal:
 ## Run and verify
 
 1. Open the target PCB and call `get_pcb_stack_layers` when current layers affect the decision.
-2. Inspect only the nets, components, or PCB data needed to write correct intent.
+2. For full-board routing, review complete connectivity once and classify every connected net; use targeted inspection for a partial operation. Confirm that the placement and intended layers provide plausible corridors and package escapes before starting the router.
 3. Write one complete DSL transaction and call `run_pcb_router_dsl({ file })`.
 4. If it returns `status: "running"`, call `wait_operation({ operation_id })` until terminal.
 5. Review the compact routing, copper, diagnostics, and `drc` summary. Use `check_pcb_drc` when violation details are needed. A useful `partial` result is intentionally applied; incompleteness alone is not a reason to restore it.
 6. Use `inspect_net` for a reported or critical net. Render a focused `preview_pcb` only when visual copper evidence helps.
 7. Do not repeat native DRC immediately unless the router result is incomplete or the board changed afterward.
-8. If a successfully applied result has one clear local tool-generated violation, diagnose it and use one focused follow-up DSL repair without restoring the checkpoint. Recheck the changed result.
+8. If a successfully applied result has one clear local tool-generated violation, diagnose it and use one focused follow-up DSL repair without restoring the checkpoint. Recheck the changed result. If the failure is caused by component geometry or a blocked corridor, stop retrying the router and identify the placement change required.
 9. If violations remain, decide whether to keep, repair, or restore. Keep only a non-blocking accepted condition; repair when the scope is safe and local; restore when the result clearly violates requirements, causes a broad regression, or safe repair would overwrite substantial user copper. Ask the user only when the acceptance requirement itself is unknown.
 10. After repair or restore, repeat current analysis and DRC, then report the decision and evidence.
 

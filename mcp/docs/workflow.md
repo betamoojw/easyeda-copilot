@@ -22,11 +22,11 @@ Use this composition only when the user requests a complete schematic-to-PCB wor
 4. Create or open the linked BOARD and PCB documents. If both are missing, create the PCB first, then create the BOARD with the schematic UUID and returned PCB UUID. Reuse existing documents instead of duplicating them.
 5. Call `import_pcb_changes` when synchronization is needed.
 6. **Stop.** Tell the user that EasyEDA normally opens an import dialog and ask them to confirm it. Continue only after the user confirms completion.
-7. Open the target PCB and select the placement preservation mode.
+7. Open the target PCB. Inspect complete connectivity once and derive a provisional placement-and-routing plan: logical signal paths, power flow, thermal needs, layer/via strategy, escape directions, and routing corridors. Then select the placement preservation mode.
 8. If mechanics are affected, run the mechanical preview and obtain user approval.
-9. Run full placement, obtain final placement approval, and assemble the approved `layoutId`.
-10. Run targeted live-PCB checks.
-11. Apply requested layer count, DRC rules, copper, and routing as one complete router DSL transaction by default.
+9. Run full placement, verify it remains realistically routable under that plan, obtain final placement approval, and assemble the approved `layoutId`.
+10. Run targeted live-PCB checks and confirm that critical signal, power, return, escape, and thermal paths remain feasible.
+11. Apply requested layer count, DRC rules, copper, and routing as one complete router DSL transaction by default. If placement is the routing bottleneck, return to placement when the requested scope allows it; do not hide the problem with repeated routing attempts.
 12. Review router diagnostics and native DRC, then stop at the requested boundary.
 
 If the user requests only one stage, start there and do not perform later stages.

@@ -12,6 +12,7 @@ Use only the checks relevant to the requested stage. A successful generator resp
 ## Placement and mechanics
 
 - Treat the solver report and `previewSvgPath` as pre-assembly evidence.
+- Confirm that every critical logical path remains physically ordered across series components and has a plausible continuous routing corridor. Check high-current copper space, return paths, dense-package escapes, via fields, and each reviewed thermal candidate; empty board area elsewhere is not evidence of routability.
 - When `refineGroup` is used, verify each named designator's new pose and confirm that preserved components outside the group stayed fixed. For connectors or other mechanical parts, inspect orientation and access in the preview. A run with no accepted refinement move is valid.
 - After assembly, use `inspect_component` for affected components.
 - Use `preview_pcb` for connectors, mechanics, suspicious overlap, or a requested visual check; do not render every ordinary edit.
@@ -20,6 +21,7 @@ Use only the checks relevant to the requested stage. A successful generator resp
 ## Copper and routing
 
 - Review the compact routing, copper, diagnostics, and `drc` summary. Use `check_pcb_drc` when violation details are needed.
+- Distinguish a router/rule failure from a placement bottleneck. Do not keep retrying routing when component geometry blocks the only valid corridor or package escape; report the required placement change, and change placement only when the task scope permits it.
 - Use `inspect_net` for a reported or critical net instead of inspecting every net.
 - Do not immediately repeat `check_pcb_drc` when the router already returned current native DRC. Repeat it after later editor changes or when the returned result is incomplete.
 - A DRC finding does not automatically require rollback and does not freeze the applied board. Repair one clear local tool-generated error with a focused follow-up transaction, then check the changed result.

@@ -30,6 +30,7 @@ Complete only the stage requested by the user. A schematic task does not authori
 - `beautify_schematic_on_current_page` rebuilds the entire current page. Every current-page component must appear in exactly one functional block.
 - After `import_pcb_changes`, stop and ask the user to confirm the EasyEDA import dialog. Do not continue until the user says it is complete.
 - Open the target PCB before `make_pcb_layout`; this supplies its outline and component positions to `preserve(...)`.
+- Treat placement and routing as one coupled physical problem: plan plausible signal, power, return, escape, and thermal paths before placement, then verify placement feasibility before routing. High density is valid when the intended layer and via strategy supports it.
 - Placement preview is not applied. Assemble only a completed final `layoutId`, after user approval.
 - Long placement and routing calls are complete only after `wait_operation` returns a terminal result. If calculation finished but applying its saved in-memory result failed, retry it with `apply_operation` instead of rerunning the calculation.
 - Existing PCB copper and objects are preserved by placement assembly. Existing routing is preserved by the router unless `clearRouting(...)` explicitly selects copper to replace.
