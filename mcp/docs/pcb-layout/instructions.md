@@ -2,14 +2,14 @@
 
 `make_pcb_layout` creates placement and mechanics only. It returns a preview and stored `layoutId`; it does not apply the result or authorize routing.
 
-Read `dsl.ts` as the exact syntax source. The files in `examples/` are patterns, not authority.
+Read `dsl.ts` as the exact syntax source. The files in `examples/` are patterns, not authority. They use the same order: board and global rules, functional blocks, components and mechanics, electrical placement intent, then output and solver. Read any examples that help, but derive designators, dimensions, pin numbers, and constraints from the actual board.
 
 ## Start
 
 1. Resolve the BOARD, linked schematic, and target PCB with `get_current_project_info`.
 2. If schematic changes must be imported, call `import_pcb_changes`, then **stop and ask the user to confirm the EasyEDA import dialog**. Continue only after confirmation.
 3. Open the target PCB before `make_pcb_layout`. The MCP captures its outline and linked schematic-component positions as `existingPlacement`.
-4. Call `get_pcb_component_sizes` once for the required components or, when board sizing requires it, the full board.
+4. Call `get_pcb_component_sizes` once for the required designators. Use `includeAll: true` only when sizing or validating the board genuinely requires every component; its output is much larger.
 5. Select one preservation mode before writing DSL.
 
 | Intent | DSL |
@@ -45,7 +45,9 @@ Assembly preserves existing copper and board objects. It replaces the existing o
 - Keep blocks below 12 components. Split dense functions into local power, clock, flash, feedback, input, output, or interface islands.
 - Keep an IC with the local parts that make its stage work; do not group by component type.
 - Do not mix top and bottom components in one block.
+- A block containing `fixed`, `edgeMount`, or `edgePlace` components must be board-level/main. It cannot use `placement: "satellite"` or `attachTo`; relate its electronics to other blocks with `near`, `veryNear`, or `criticalPair`.
 - Use modules as soft macro groups; do not put distant edge connectors into one sparse module.
+- Do not repeat a satellite in a module that already contains its parent block; the parent family already owns that satellite.
 - Use `criticalPair` for one isolated dominant pad-to-pad hop that is not part of a longer declared path.
 - Use `corePairs` for several independent dominant pairs inside one block, not for the consecutive segments of a signal chain.
 - Use `signalPath` only for a physically critical ordered chain, especially RF or high-speed signals through series matching, filtering, or termination parts. It is self-contained: do not repeat its segments with `criticalPair` or `corePairs`, because overlapping attraction rules can over-constrain the placer.
@@ -53,6 +55,11 @@ Assembly preserves existing copper and board objects. It replaces the existing o
 - Use `capCluster` for two or more capacitors sharing supply and return; use `bypass`, `veryNear`, or `criticalPair` for a single capacitor.
 - Use `fixed` only for a true mechanical coordinate.
 - Use `constraintRegion` for placement exclusion; it is not a copper keepout.
+
+Current examples:
+
+- `examples/esp32c3-devboard.js`: edge mechanics, power clusters, two USB signal paths, and a diagnostic-justified refinement group.
+- `examples/rf-amplifier.js`: a straight critical RF path between edge-mounted connectors and a separate power section.
 
 Example for one critical RF chain:
 

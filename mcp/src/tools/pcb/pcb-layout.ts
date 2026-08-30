@@ -360,7 +360,7 @@ export function registerPcbLayoutTools(server: McpServer, bridge: Bridge) {
         'make_pcb_layout',
         {
             title: 'Make PCB Layout',
-            description: `Create PCB component placement using JavaScript PCB layout DSL code. Open the target EasyEDA PCB first so its outline and component positions are supplied as existingPlacement. Long work returns an operation_id for wait_operation. Server-side routing is disabled: route the assembled PCB later in EasyEDA/client tools. This tool does not assemble the board. For PCB layout docs, read the local docs folder: ${SKILL_DOC_PATH}`,
+            description: `Create PCB component placement from a JavaScript DSL file. Open the target PCB first so its outline and component positions are supplied as existingPlacement. Long work returns an operation_id for wait_operation. This tool does not assemble or route the board. For PCB layout docs, read: ${SKILL_DOC_PATH}`,
             inputSchema: z.object({
                 file: z.string().min(1).describe('Path to a JavaScript PCB layout DSL code file.'),
                 wait_ms: z.number().int().min(1_000).max(55_000).default(DEFAULT_PCB_LAYOUT_WAIT_MS)

@@ -67,7 +67,7 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
         'component_search',
         {
             title: 'Search EasyEDA Component',
-            description: 'Search a component on the main EasyEDA Copilot server by exact part_uuid or MPN only.',
+            description: 'Search components. Prefer an exact part_uuid or manufacturer MPN; use a short part description only to discover candidates when the exact MPN is unknown.',
             inputSchema: z.object({
                 part_uuid: z.string().nullable().optional(),
                 MPN: z.string().nullable().optional(),
@@ -87,7 +87,7 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
         'search_reused_block',
         {
             title: 'Search Reused Block',
-            description: `Search pre-assembled EasyEDA Copilot reused blocks that can be recalculated and inserted into a circuit. For circuit workflow docs, read the local docs folder: ${SKILL_DOC_PATH}`,
+            description: `Search pre-assembled reusable circuit blocks. For circuit workflow docs, read: ${SKILL_DOC_PATH}`,
             inputSchema: z.object({
                 query: z.string().describe('Query example: "3.3V power regulator"'),
                 page: z.number().min(1).default(1).describe('Current results page.'),
@@ -105,7 +105,7 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
         'extract_circuit_on_current_page',
         {
             title: 'Extract Circuit',
-            description: `Post-process circuit changes on the main EasyEDA Copilot server and sends the assembled result to EasyEDA. Every added component must include part_uuid. The result reports remaining current-sheet space and warns below 10%. For circuit modification docs, read the local docs folder: ${SKILL_DOC_PATH}`,
+            description: `Apply circuit changes to the current EasyEDA page. Every added component must include part_uuid. The result reports remaining current-sheet space and warns below 10%. For circuit modification docs, read: ${SKILL_DOC_PATH}`,
             inputSchema: CircuitModStruct(),
         },
         async (circuit) => {
@@ -135,7 +135,7 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
         'beautify_schematic_on_current_page',
         {
             title: 'Beautify EasyEDA Schematic',
-            description: `Reassemble every component on the current EasyEDA schematic page into named functional blocks. The blocks must cover the whole page. A checkpoint is saved before the server request, and assembly failures restore it automatically. For circuit workflow docs, read the local docs folder: ${SKILL_DOC_PATH}`,
+            description: `Reassemble every component on the current EasyEDA schematic page into named functional blocks. The blocks must cover the whole page. A checkpoint is saved before replacement, and failures restore it automatically. For circuit workflow docs, read: ${SKILL_DOC_PATH}`,
             inputSchema: z.object({
                 blocks: z.record(
                     z.string().min(1).describe('Block name.'),
@@ -197,13 +197,13 @@ export function registerCircuitTools(server: McpServer, bridge: Bridge) {
             });
             const assembly = serverAssembly(response);
             if (!assembly || !Array.isArray(assembly.components)) {
-                throw new Error('Beautify server returned an invalid circuit assembly.');
+                throw new Error('Beautify returned an invalid circuit assembly.');
             }
 
             const assembledDesignators = new Set(assembly.components.map(component => baseDesignator(component.designator)));
             const absentFromAssembly = [...components.keys()].filter(designator => !assembledDesignators.has(designator));
             if (absentFromAssembly.length) {
-                throw new Error(`Beautify server omitted components: ${absentFromAssembly.join(', ')}`);
+                throw new Error(`Beautify omitted components: ${absentFromAssembly.join(', ')}`);
             }
 
             assembly.rm_components = [];

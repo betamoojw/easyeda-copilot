@@ -8,7 +8,7 @@ export function registerCheckpointTools(server: McpServer, bridge: Bridge) {
         'list_checkpoints',
         {
             title: 'List EasyEDA Checkpoints',
-            description: 'List checkpoints saved by the EasyEDA Copilot extension.',
+            description: 'List saved checkpoints.',
             inputSchema: z.object({}),
         },
         async () => {

@@ -8,7 +8,7 @@ export function registerEasyEdaInstancesTools(server: McpServer, bridge: Bridge)
         'list_easyeda_instances',
         {
             title: 'List EasyEDA Instances',
-            description: 'List currently connected EasyEDA Copilot extension instances. Use this when more than one EasyEDA window/project may be open.',
+            description: 'List connected EasyEDA instances. Use when more than one window or project may be open.',
             inputSchema: z.object({}),
         },
         async () => {
