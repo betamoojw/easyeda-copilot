@@ -29,15 +29,56 @@ function presetFamily(root: JsonRecord, category: string, family: string) {
     return familyObject;
 }
 
-function createPreset(root: JsonRecord, category: string, family: string, name: string) {
+// EasyEDA introduces sub-micron unit-conversion noise when a preset is saved and read back.
+const PRESET_NUMBER_EPSILON = 1e-5;
+const PRESET_IDENTITY_FIELDS = new Set(['editName', 'isSetDefault']);
+
+function samePresetValue(left: unknown, right: unknown): boolean {
+    if (typeof left === 'number' && typeof right === 'number') {
+        return Number.isFinite(left) && Number.isFinite(right)
+            ? Math.abs(left - right) <= PRESET_NUMBER_EPSILON
+            : Object.is(left, right);
+    }
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return Array.isArray(left) && Array.isArray(right)
+            && left.length === right.length
+            && left.every((item, index) => samePresetValue(item, right[index]));
+    }
+    const leftRecord = record(left);
+    const rightRecord = record(right);
+    if (leftRecord || rightRecord) {
+        if (!leftRecord || !rightRecord) return false;
+        const leftKeys = Object.keys(leftRecord).filter(item => !PRESET_IDENTITY_FIELDS.has(item)).sort();
+        const rightKeys = Object.keys(rightRecord).filter(item => !PRESET_IDENTITY_FIELDS.has(item)).sort();
+        return leftKeys.length === rightKeys.length
+            && leftKeys.every((item, index) => item === rightKeys[index]
+                && samePresetValue(leftRecord[item], rightRecord[item]));
+    }
+    return Object.is(left, right);
+}
+
+function createPreset(
+    root: JsonRecord,
+    category: string,
+    family: string,
+    name: string,
+    configure: (preset: JsonRecord) => void,
+) {
     const presets = presetFamily(root, category, family);
     const source = Object.values(presets).map(record).find((item): item is JsonRecord => Boolean(item));
     if (!source) throw new TypeError(`EasyEDA DRC preset family is empty: ${category}.${family}`);
     const output = clone<JsonRecord>(source);
     output.editName = name;
     output.isSetDefault = false;
+    configure(output);
+    const existing = Object.entries(presets).find(([existingName, value]) => {
+        const candidate = record(value);
+        return existingName !== 'default' && candidate?.isSetDefault !== true
+            && samePresetValue(candidate, output);
+    });
+    if (existing) return { name: existing[0], preset: record(existing[1])! };
     presets[name] = output;
-    return output;
+    return { name, preset: output };
 }
 
 function rewriteNumbers(value: unknown, replacement: number): unknown {
@@ -174,44 +215,44 @@ function assignPhysicalPresets(
     values: RoutingRuleValues,
     prefix: string,
 ) {
-    const trackName = `${prefix}_track`;
-    const track = createPreset(configuration, 'Physics', 'Track', trackName);
-    const formData = record(record(track.form)?.data);
-    const widthEntry = formData && (record(formData['1']) ?? Object.values(formData).map(record).find(Boolean));
-    if (!widthEntry) throw new TypeError('EasyEDA Track preset does not expose form.data width fields.');
-    widthEntry.minValue = values.minTrackWidthMm;
-    widthEntry.defaultValue = values.preferredTrackWidthMm;
-    widthEntry.maxValue = maximumTrackWidth(values);
-    rule.Track = trackName;
-
-    const viaName = `${prefix}_via`;
-    const via = createPreset(configuration, 'Physics', 'Via Size', viaName);
-    replaceNamedValues(via, {
-        viaOuterdiameterMin: values.via.minDiameterMm,
-        viaOuterdiameterDefault: values.via.preferredDiameterMm,
-        viaOuterdiameterMax: Math.max(values.via.minDiameterMm, values.via.preferredDiameterMm),
-        viaInnerdiameterMin: values.via.minDrillMm,
-        viaInnerdiameterDefault: values.via.preferredDrillMm,
-        viaInnerdiameterMax: Math.max(values.via.minDrillMm, values.via.preferredDrillMm),
+    const track = createPreset(configuration, 'Physics', 'Track', `${prefix}_track`, preset => {
+        const formData = record(record(preset.form)?.data);
+        const widthEntry = formData && (record(formData['1']) ?? Object.values(formData).map(record).find(Boolean));
+        if (!widthEntry) throw new TypeError('EasyEDA Track preset does not expose form.data width fields.');
+        widthEntry.minValue = values.minTrackWidthMm;
+        widthEntry.defaultValue = values.preferredTrackWidthMm;
+        widthEntry.maxValue = maximumTrackWidth(values);
     });
-    rule['Via Size'] = viaName;
+    rule.Track = track.name;
 
-    const spacingName = `${prefix}_spacing`;
-    const spacing = createPreset(configuration, 'Spacing', 'Safe Spacing', spacingName);
-    const rewriteContent = (value: unknown) => {
-        if (Array.isArray(value)) {
-            for (const child of value) rewriteContent(child);
-            return;
-        }
-        const item = record(value);
-        if (!item) return;
-        for (const [key, child] of Object.entries(item)) {
-            if (key === 'content') item[key] = rewriteNumbers(child, values.clearanceMm);
-            else rewriteContent(child);
-        }
-    };
-    rewriteContent(spacing);
-    rule['Safe Spacing'] = spacingName;
+    const via = createPreset(configuration, 'Physics', 'Via Size', `${prefix}_via`, preset => {
+        replaceNamedValues(preset, {
+            viaOuterdiameterMin: values.via.minDiameterMm,
+            viaOuterdiameterDefault: values.via.preferredDiameterMm,
+            viaOuterdiameterMax: Math.max(values.via.minDiameterMm, values.via.preferredDiameterMm),
+            viaInnerdiameterMin: values.via.minDrillMm,
+            viaInnerdiameterDefault: values.via.preferredDrillMm,
+            viaInnerdiameterMax: Math.max(values.via.minDrillMm, values.via.preferredDrillMm),
+        });
+    });
+    rule['Via Size'] = via.name;
+
+    const spacing = createPreset(configuration, 'Spacing', 'Safe Spacing', `${prefix}_spacing`, preset => {
+        const rewriteContent = (value: unknown) => {
+            if (Array.isArray(value)) {
+                for (const child of value) rewriteContent(child);
+                return;
+            }
+            const item = record(value);
+            if (!item) return;
+            for (const [key, child] of Object.entries(item)) {
+                if (key === 'content') item[key] = rewriteNumbers(child, values.clearanceMm);
+                else rewriteContent(child);
+            }
+        };
+        rewriteContent(preset);
+    });
+    rule['Safe Spacing'] = spacing.name;
 }
 
 function assignDifferentialPreset(
@@ -222,18 +263,20 @@ function assignDifferentialPreset(
     index: number,
 ) {
     if (!values.differential) return;
+    const differential = values.differential;
     const name = `copilot_router_diff_${index}`;
-    const preset = createPreset(configuration, 'Physics', 'Differential Pair', name);
-    replaceNamedTables(preset, {
-        strokeWidthTables: values.differential.trackWidthMm,
-        diffPairSpacingTables: values.differential.gapMm,
+    const selection = createPreset(configuration, 'Physics', 'Differential Pair', name, preset => {
+        replaceNamedTables(preset, {
+            strokeWidthTables: differential.trackWidthMm,
+            diffPairSpacingTables: differential.gapMm,
+        });
+        if (differential.maxSkewMm !== undefined) replaceNamedValues(
+            preset,
+            { differentailPairLenTolerMax: differential.maxSkewMm },
+        );
     });
-    if (values.differential.maxSkewMm !== undefined) replaceNamedValues(
-        preset,
-        { differentailPairLenTolerMax: values.differential.maxSkewMm },
-    );
     for (const net of [pair.positive, pair.negative]) {
-        for (const occurrence of netOccurrences(netRules, net)) occurrence['Differential Pair'] = name;
+        for (const occurrence of netOccurrences(netRules, net)) occurrence['Differential Pair'] = selection.name;
     }
 }
 
@@ -267,21 +310,22 @@ function assignCopperZonePreset(
 
     if (zone.clearanceMm !== undefined) {
         const spacingName = `copilot_router_zone_${index}_spacing`;
-        const spacing = createPreset(configuration, 'Spacing', 'Safe Spacing', spacingName);
-        const updateContent = (value: unknown) => {
-            if (Array.isArray(value)) {
-                for (const child of value) updateContent(child);
-                return;
-            }
-            const item = record(value);
-            if (!item) return;
-            for (const [key, child] of Object.entries(item)) {
-                if (key === 'content') item[key] = rewriteNumbers(child, zone.clearanceMm!);
-                else updateContent(child);
-            }
-        };
-        updateContent(spacing);
-        for (const rule of occurrences) rule['Copper Safe Spacing'] = spacingName;
+        const spacing = createPreset(configuration, 'Spacing', 'Safe Spacing', spacingName, preset => {
+            const updateContent = (value: unknown) => {
+                if (Array.isArray(value)) {
+                    for (const child of value) updateContent(child);
+                    return;
+                }
+                const item = record(value);
+                if (!item) return;
+                for (const [key, child] of Object.entries(item)) {
+                    if (key === 'content') item[key] = rewriteNumbers(child, zone.clearanceMm!);
+                    else updateContent(child);
+                }
+            };
+            updateContent(preset);
+        });
+        for (const rule of occurrences) rule['Copper Safe Spacing'] = spacing.name;
     }
 
     const padConnection = zone.padConnection
@@ -289,15 +333,16 @@ function assignCopperZonePreset(
     if (!padConnection) return;
 
     const presetName = `copilot_router_zone_${index}_copper`;
-    const preset = createPreset(configuration, 'Plane', 'Copper Zone', presetName);
     const connectMode = { thermal: 0, solid: 1, none: 2 }[padConnection.mode];
-    for (const model of copperZonePadModels(preset)) {
-        model.connectMode = connectMode;
-        if (padConnection.thermalGapMm !== undefined) model.lineClearance = padConnection.thermalGapMm;
-        if (padConnection.spokeWidthMm !== undefined) model.lineWidth = padConnection.spokeWidthMm;
-        if (padConnection.spokeAngleDeg !== undefined) model.lineAngle = padConnection.spokeAngleDeg;
-    }
-    for (const rule of occurrences) rule['Copper Zone'] = presetName;
+    const selection = createPreset(configuration, 'Plane', 'Copper Zone', presetName, preset => {
+        for (const model of copperZonePadModels(preset)) {
+            model.connectMode = connectMode;
+            if (padConnection.thermalGapMm !== undefined) model.lineClearance = padConnection.thermalGapMm;
+            if (padConnection.spokeWidthMm !== undefined) model.lineWidth = padConnection.spokeWidthMm;
+            if (padConnection.spokeAngleDeg !== undefined) model.lineAngle = padConnection.spokeAngleDeg;
+        }
+    });
+    for (const rule of occurrences) rule['Copper Zone'] = selection.name;
 }
 
 /** Add native per-net copper clearance and thermal presets requested by routed zones. */
@@ -849,10 +894,11 @@ export function routingRulesToEasyEdaDrcBundle(
         const groupRule = ensureEqualLengthGroup(netRules, group.id, group.nets);
         if (!changes.matchedGroups.has(group.id)) continue;
         const name = `copilot_router_match_${index}`;
-        const tolerance = createPreset(ruleConfiguration, 'Physics', 'Net Length Tolerance', name);
-        replaceNamedValues(tolerance, { netLengthTolerance: group.toleranceMm });
-        groupRule['Net Length Tolerance'] = name;
-        for (const member of groupRule.sub) member['Net Length Tolerance'] = name;
+        const tolerance = createPreset(ruleConfiguration, 'Physics', 'Net Length Tolerance', name, preset => {
+            replaceNamedValues(preset, { netLengthTolerance: group.toleranceMm });
+        });
+        groupRule['Net Length Tolerance'] = tolerance.name;
+        for (const member of groupRule.sub) member['Net Length Tolerance'] = tolerance.name;
     }
     const targetGroupNames = new Set((rules.matchedGroups ?? []).map(item => item.id));
     netRules = netRules.filter(rule => rule.type !== 'equalLengthGroup' || targetGroupNames.has(rule.name));

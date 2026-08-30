@@ -437,8 +437,23 @@ const matchedGroup = translated.netRules.find(rule => rule.type === 'equalLength
 assert.deepEqual(matchedGroup.sub.map(rule => rule.name), ['MATCH_A', 'MATCH_B']);
 assert.equal(matchedGroup['Net Length Tolerance'], 'copilot_router_match_0');
 assert.equal(matchedGroup.sub[0]['Net Length Tolerance'], 'copilot_router_match_0');
-assert.equal(matchedGroup.sub[0].Track, 'copilot_router_net_2_track');
+assert.equal(matchedGroup.sub[0].Track, 'copilot_router_class_0_track');
 assert.equal(matchedGroup.sub[0]['Differential Pair'], undefined);
+assert.deepEqual(
+    Object.keys(translated.ruleConfiguration.Physics.Track).sort(),
+    ['copilot_router_class_0_track', 'default'],
+    'equal physical rules must share one newly created Track preset',
+);
+assert.deepEqual(
+    Object.keys(translated.ruleConfiguration.Physics['Via Size']).sort(),
+    ['copilot_router_class_0_via', 'default'],
+    'equal physical rules must share one newly created Via Size preset',
+);
+assert.deepEqual(
+    Object.keys(translated.ruleConfiguration.Spacing['Safe Spacing']).sort(),
+    ['copilot_router_class_0_spacing', 'default'],
+    'equal physical rules must share one newly created Safe Spacing preset',
+);
 
 assert.equal(translated.ruleConfiguration.Physics.Track.copilot_router_class_0_track.form.data['1'].defaultValue, 0.3);
 assert.equal(translated.ruleConfiguration.Physics.Track.copilot_router_class_0_track.form.data['1'].maxValue, 1.3);
@@ -500,6 +515,52 @@ assert.equal(
 const noOpDrc = drcAdapter.routingRulesToEasyEdaDrcBundle(nativeDrcFixture, sourceRoutingRules, sourceRoutingRules);
 assert.deepEqual(noOpDrc, nativeDrcFixture, 'a semantic no-op must preserve the native DRC bundle exactly');
 assert.equal(drcAdapter.diffRoutingRules(sourceRoutingRules, sourceRoutingRules).hasChanges, false);
+
+const existingPresetDrc = structuredClone(nativeDrcFixture);
+const existingTrack = structuredClone(existingPresetDrc.ruleConfiguration.Physics.Track.default);
+existingTrack.editName = 'existing_track';
+existingTrack.isSetDefault = false;
+existingTrack.form.data['1'] = { minValue: 0.1999996, defaultValue: 0.2999994, maxValue: 1.2999994 };
+existingPresetDrc.ruleConfiguration.Physics.Track.existing_track = existingTrack;
+const existingVia = structuredClone(existingPresetDrc.ruleConfiguration.Physics['Via Size'].default);
+existingVia.editName = 'existing_via';
+existingVia.isSetDefault = false;
+Object.assign(existingVia, {
+    viaOuterdiameterMin: 0.5999988,
+    viaOuterdiameterDefault: 0.6999986,
+    viaOuterdiameterMax: 0.6999986,
+    viaInnerdiameterMin: 0.2999994,
+    viaInnerdiameterDefault: 0.3499993,
+    viaInnerdiameterMax: 0.3499993,
+});
+existingPresetDrc.ruleConfiguration.Physics['Via Size'].existing_via = existingVia;
+const existingSpacing = structuredClone(existingPresetDrc.ruleConfiguration.Spacing['Safe Spacing'].default);
+existingSpacing.editName = 'existing_spacing';
+existingSpacing.isSetDefault = false;
+existingSpacing.tables['1'].content = [[0.2199996, 0.2199996]];
+existingPresetDrc.ruleConfiguration.Spacing['Safe Spacing'].existing_spacing = existingSpacing;
+const reusedExistingPresets = drcAdapter.routingRulesToEasyEdaDrcBundle(
+    existingPresetDrc, sourceRoutingRules, targetRoutingRules,
+);
+const reusedExistingClass = reusedExistingPresets.netRules.find(rule => rule.type === 'netClass' && rule.name === 'FAST');
+assert.equal(reusedExistingClass.Track, 'existing_track');
+assert.equal(reusedExistingClass['Via Size'], 'existing_via');
+assert.equal(reusedExistingClass['Safe Spacing'], 'existing_spacing');
+assert.equal(
+    Object.keys(reusedExistingPresets.ruleConfiguration.Physics.Track).some(name => name.startsWith('copilot_router_')),
+    false,
+    'an equivalent existing Track preset must be reused despite native numeric round-trip noise',
+);
+assert.equal(
+    Object.keys(reusedExistingPresets.ruleConfiguration.Physics['Via Size']).some(name => name.startsWith('copilot_router_')),
+    false,
+    'an equivalent existing Via Size preset must be reused despite native numeric round-trip noise',
+);
+assert.equal(
+    Object.keys(reusedExistingPresets.ruleConfiguration.Spacing['Safe Spacing']).some(name => name.startsWith('copilot_router_')),
+    false,
+    'an equivalent existing Safe Spacing preset must be reused despite native numeric round-trip noise',
+);
 
 const zoneDrc = drcAdapter.routingZonesToEasyEdaDrcBundle(nativeDrcFixture, application.zones);
 const zoneRule = zoneDrc.netRules.find(rule => rule.type === 'net' && rule.name === 'SIG');
