@@ -313,25 +313,9 @@ export function routingZonesToEasyEdaDrcBundle(
         if (zone.clearanceMm === undefined && zone.connection === undefined && zone.padConnection === undefined) {
             continue;
         }
-        const previous = byNet.get(zone.net);
-        if (previous) {
-            const previousPolicy = JSON.stringify({
-                clearanceMm: previous.clearanceMm,
-                connection: previous.connection,
-                padConnection: previous.padConnection,
-            });
-            const nextPolicy = JSON.stringify({
-                clearanceMm: zone.clearanceMm,
-                connection: zone.connection,
-                padConnection: zone.padConnection,
-            });
-            if (previousPolicy !== nextPolicy) {
-                throw new TypeError(
-                    `EasyEDA cannot apply different Copper Zone thermal policies to multiple zones on net ${zone.net}.`,
-                );
-            }
-            continue;
-        }
+        // EasyEDA exposes Copper Zone settings per net, not per zone. Keep every
+        // zone geometry and let the last declared zone select the effective native
+        // policy, matching the DSL's normal cascading override semantics.
         byNet.set(zone.net, zone);
     }
 

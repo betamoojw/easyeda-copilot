@@ -584,7 +584,7 @@ export function importEasyEdaAutorouteJson(
         const points = path(track.path);
         const widthMm = finite(track.width);
         if (!net || !layer || !widthMm || points.length < 2) {
-            diagnostics.push({ code: 'EASYEDA_TRACK_INVALID', severity: 'error', message: `tracks[${index}] is invalid.` });
+            diagnostics.push({ code: 'EASYEDA_TRACK_INVALID', severity: 'warning', message: `tracks[${index}] is invalid.` });
             return [];
         }
         netNames.add(net);
@@ -597,7 +597,7 @@ export function importEasyEdaAutorouteJson(
         const at = point(via.location);
         const size = numberList(via.size);
         if (!net || !at || size.length < 2 || !top || !bottom) {
-            diagnostics.push({ code: 'EASYEDA_VIA_INVALID', severity: 'error', message: `vias[${index}] is invalid.` });
+            diagnostics.push({ code: 'EASYEDA_VIA_INVALID', severity: 'warning', message: `vias[${index}] is invalid.` });
             return [];
         }
         netNames.add(net);

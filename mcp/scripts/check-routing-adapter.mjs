@@ -514,10 +514,17 @@ assert.equal(
     zoneDrc.ruleConfiguration.Spacing['Safe Spacing'].copilot_router_zone_0_spacing.tables['1'].content[0][0],
     0.24,
 );
-assert.throws(() => drcAdapter.routingZonesToEasyEdaDrcBundle(nativeDrcFixture, [
+const conflictingZoneDrc = drcAdapter.routingZonesToEasyEdaDrcBundle(nativeDrcFixture, [
     application.zones[0],
     { ...application.zones[0], padConnection: { mode: 'solid' } },
-]), /different Copper Zone thermal policies/);
+]);
+const conflictingZoneRule = conflictingZoneDrc.netRules.find(rule => rule.type === 'net' && rule.name === 'SIG');
+const conflictingZonePreset = conflictingZoneDrc.ruleConfiguration.Plane['Copper Zone'][conflictingZoneRule['Copper Zone']];
+assert.equal(
+    conflictingZonePreset.form.singleLayerPadModel.data['1'].connectMode,
+    1,
+    'EasyEDA must keep the geometry and use the last declared per-net Copper Zone policy',
+);
 
 const existingClassBundle = structuredClone(nativeDrcFixture);
 existingClassBundle.netRules = [{
