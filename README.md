@@ -101,7 +101,7 @@ The built-in Interface represents a substantial part of the project's history an
 
 PCB placement is available only through an external MCP client such as Codex or Claude Code. It is not available in the built-in Copilot chat.
 
-MCP creates placement: board outline, mechanical constraints, components, mounting holes, board pads, and designator positions. Review the mechanical preview first, approve the final placement, then import it into EasyEDA. After assembly, MCP can run the `eda-copilot-router` DSL through the managed KRT backend, inspect PCB objects, and invoke EasyEDA DRC on the open Desktop document.
+MCP creates placement: board outline, mechanical constraints, components, mounting holes, board pads, and designator positions. Review the mechanical preview first, approve the final placement, then import it into EasyEDA. After assembly, MCP can run the `eda-copilot-router` DSL through the managed Hybrid backend, inspect PCB objects, and invoke EasyEDA DRC on the open Desktop document.
 
 PCB assembly, preview, and client routing support are verified with **EasyEDA Desktop V3.2.149**.
 

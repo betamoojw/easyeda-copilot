@@ -7,7 +7,14 @@ import {
 } from './eda/pcb-assemble';
 import { checkpointer } from './eda/checkpointer';
 import { checkPcbDrc } from './eda/drc';
-import { getPcb, getPcbExistingPlacement, getPcbRaw, inspectComponent, inspectNet } from './eda/pcb';
+import {
+    getPcb,
+    getPcbExistingPlacement,
+    getPcbRaw,
+    getPcbRoutingPadHoles,
+    inspectComponent,
+    inspectNet,
+} from './eda/pcb';
 import { getSchematic } from './eda/schematic';
 import { estimateSchematicSheetSpace } from './eda/sheet-space';
 import { rmPartFromDesignator, withTimeout } from './eda/utils';
@@ -1420,13 +1427,19 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
 
         if (message.event === 'export-routing-input') {
             const { file, text } = await exportRoutingInput();
+            const [drc, stack, padHoles] = await Promise.all([
+                exportPcbDrcRules(),
+                getPcbStackLayers(),
+                getPcbRoutingPadHoles(),
+            ]);
             reply(true, {
                 name: file.name,
                 size: file.size,
                 type: file.type,
                 text,
-                drc: await exportPcbDrcRules(),
-                stack: await getPcbStackLayers(),
+                drc,
+                stack,
+                padHoles,
             });
             return;
         }

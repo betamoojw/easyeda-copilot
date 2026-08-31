@@ -61,6 +61,38 @@ assert.deepEqual(imported.board.pads.map(item => item.at), [{ x: 1, y: -3 }, { x
 assert.deepEqual(imported.board.pads[0].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
 assert.deepEqual(imported.board.pads[1].shape, { kind: 'rect', widthMm: 1, heightMm: 1 });
 
+const nativeRoundHole = {
+    id: 'placed-j1-pad-1', component: 'J1', x: -2, y: 0, net: 'SIG_N', padNumber: '1',
+    layer: 'MULTI', rotation: 0,
+    hole: { data: ['ROUND', 0.9], offsetX: 0, offsetY: 0, rotation: 0 },
+};
+const nativeHoleImport = adapter.importEasyEdaAutorouteJson(fixture, { padHoles: [nativeRoundHole] });
+assert.ok(nativeHoleImport.board, JSON.stringify(nativeHoleImport.diagnostics));
+assert.deepEqual(nativeHoleImport.board.pads[2].hole, {
+    shape: 'round', diameterMm: 0.9, plated: true,
+}, 'native EasyEDA drill metadata must enrich the autorouter pad by component, number, and position');
+assert.equal(
+    nativeHoleImport.diagnostics.some(item => item.code === 'EASYEDA_PAD_HOLE_METADATA_MISSING'),
+    false,
+);
+
+const nativeSlotImport = adapter.importEasyEdaAutorouteJson(fixture, {
+    padHoles: [{
+        ...nativeRoundHole,
+        hole: { data: ['SLOT', 0.6, 1.4], offsetX: 0.1, offsetY: -0.2, rotation: 45 },
+    }],
+});
+assert.ok(nativeSlotImport.board, JSON.stringify(nativeSlotImport.diagnostics));
+assert.deepEqual(nativeSlotImport.board.pads[2].hole, {
+    shape: 'slot', diameterMm: 0.6, slotLengthMm: 0.8,
+    offset: { x: 0.1, y: 0.2 }, rotationDeg: -45, plated: true,
+});
+
+const missingNativeHoleImport = adapter.importEasyEdaAutorouteJson(fixture, { padHoles: [] });
+assert.ok(missingNativeHoleImport.board, JSON.stringify(missingNativeHoleImport.diagnostics));
+assert.ok(missingNativeHoleImport.diagnostics.some(item => item.code === 'EASYEDA_PAD_HOLE_METADATA_MISSING'),
+    'a host capture must diagnose a multi-copper pad whose native drill could not be matched');
+
 const fourLayerPadFixture = structuredClone(fixture);
 fourLayerPadFixture.footprints.tht.pads.p0.layers = [1, 2, 15, 16];
 const fourLayerPadImport = adapter.importEasyEdaAutorouteJson(fourLayerPadFixture);

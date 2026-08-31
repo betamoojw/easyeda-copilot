@@ -24,7 +24,7 @@ export default defineConfig({
     clean: true,
     dts: false,
     sourcemap: false,
-    // Keep eda-copilot-router external so its package-relative KRT assets remain
+    // Keep eda-copilot-router external so its package-relative backend assets remain
     // discoverable after easyeda-copilot-mcp is installed from npm.
     noExternal: ['@modelcontextprotocol/sdk', '@copilot/shared'],
     esbuildPlugins: [

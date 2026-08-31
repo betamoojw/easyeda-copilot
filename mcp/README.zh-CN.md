@@ -26,7 +26,7 @@ MCP 集成可以实现：
 - 在增量布局时保留已打开 PCB 的板框和选定现有元件的位置；
 - 在导入前创建机械约束和最终布局预览；
 - 将确认的布局组装到已打开的 EasyEDA PCB 文档中；
-- 通过托管 KRT 后端运行 `eda-copilot-router` DSL；
+- 通过托管 Hybrid 后端运行 `eda-copilot-router` DSL；
 - 从同一个布线 DSL 创建指定的铺铜和缝合过孔；
 - 仅在 DSL 明确调用 `clearRouting(...)` 时替换选定的现有铜箔；
 - 预览和检查 PCB 对象、网络（nets）和元件；

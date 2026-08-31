@@ -95,7 +95,7 @@ claude mcp add easyeda-copilot -- npx -y easyeda-copilot-mcp
 
 PCB 布局功能仅可通过 Codex 或 Claude Code 等外部 MCP 客户端使用。内置的 Copilot 聊天窗口不支持此功能。
 
-MCP 会生成布局信息：板框轮廓、机械约束、元器件、安装孔、焊盘和位号位置。请先查看机械预览，确认最终布局后，再将其导入 EasyEDA。组装完成后，MCP 可通过托管 KRT 后端运行 `eda-copilot-router` DSL、检查 PCB 对象，并在打开的桌面版文档上运行 EasyEDA DRC。
+MCP 会生成布局信息：板框轮廓、机械约束、元器件、安装孔、焊盘和位号位置。请先查看机械预览，确认最终布局后，再将其导入 EasyEDA。组装完成后，MCP 可通过托管 Hybrid 后端运行 `eda-copilot-router` DSL、检查 PCB 对象，并在打开的桌面版文档上运行 EasyEDA DRC。
 
 PCB 组装、预览以及客户端布线支持已在 **EasyEDA Desktop V3.2.149** 版本中验证通过。
 

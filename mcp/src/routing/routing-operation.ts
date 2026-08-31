@@ -2,11 +2,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
     compileRoutingDsl,
+    createHybridBackend,
     run,
     type RoutingDiagnostic,
     type RoutingResult,
 } from 'eda-copilot-router';
-import { createKrtBackend } from 'eda-copilot-router/backends/krt';
 import { PcbDrcBundleSchema, type PcbDrcBundle } from '@copilot/shared/types/pcb/drc.js';
 import type { Bridge } from '../bridge';
 import { operationManager, type OperationContext } from '../operations/manager';
@@ -86,6 +86,11 @@ async function executeRoutingOperation(
     const source = typeof capture?.text === 'string' ? capture.text : '';
     if (!capture || !source) throw new Error('EasyEDA returned empty autoroute JSON.');
     await writeFile(join(artifactsDirectory, 'easyeda-routing-input.json'), source);
+    const padHoles = Array.isArray(capture.padHoles) ? capture.padHoles : [];
+    await writeFile(
+        join(artifactsDirectory, 'easyeda-pad-holes.json'),
+        `${JSON.stringify(padHoles, null, 2)}\n`,
+    );
     const stack = record(capture.stack);
     const copperLayerIds = Array.isArray(stack?.layers) ? stack.layers.flatMap(item => {
         const id = record(item)?.id;
@@ -106,6 +111,7 @@ async function executeRoutingOperation(
         ...(program.clearRouting ? { clearRouting: program.clearRouting } : {}),
         ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
         ...(copperLayerIds.length ? { copperLayerIds } : {}),
+        padHoles,
     });
     if (!imported.board) {
         throw new Error(`EasyEDA routing import failed:\n${diagnosticsMessage(imported.diagnostics)}`);
@@ -122,9 +128,11 @@ async function executeRoutingOperation(
     );
 
     context.setStage('routing');
-    const backend = createKrtBackend({
-        artifactsDirectory: join(artifactsDirectory, 'krt'),
-        keepArtifacts: true,
+    const backend = createHybridBackend({
+        krt: {
+            artifactsDirectory: join(artifactsDirectory, 'krt'),
+            keepArtifacts: true,
+        },
     });
     const routingTimeout = AbortSignal.timeout(ROUTER_TIMEOUT_MS);
     const routingSignal = AbortSignal.any([
@@ -140,7 +148,7 @@ async function executeRoutingOperation(
         join(artifactsDirectory, 'routing-result.json'),
         `${JSON.stringify(result, null, 2)}\n`,
     );
-    // A watchdog-expired KRT run may still return independently audited,
+    // A watchdog-expired router run may still return independently audited,
     // applicable partial copper. Only an explicit operation cancellation may
     // veto that result after run(); status:error is handled below.
     context.signal.throwIfAborted();

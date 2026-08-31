@@ -32,7 +32,7 @@ The MCP integration can:
 - preserve the opened PCB outline and selected existing component positions during incremental placement;
 - create mechanical and final placement previews before import;
 - assemble approved placement into the opened EasyEDA PCB document;
-- run `eda-copilot-router` DSL programs through the managed KRT backend;
+- run `eda-copilot-router` DSL programs through the managed Hybrid backend;
 - create requested planes and stitching vias from the same routing DSL;
 - replace selected existing copper only when the DSL explicitly calls `clearRouting(...)`;
 - preview and inspect PCB objects, nets, and components;

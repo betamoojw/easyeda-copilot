@@ -1037,6 +1037,48 @@ function rawSourcesFromComplex(
     return [convertSourceArray(complex as TPCB_PolygonSourceArray, coordConv)];
 }
 
+/**
+ * Export the native drill data that EasyEDA's autorouter JSON omits.
+ *
+ * Keep this capture intentionally narrow: routing only needs pad identity,
+ * placement, and the native hole tuple. Reading every track/arc/polygon through
+ * getPcbRaw() made routing export needlessly expensive on dense boards.
+ */
+export async function getPcbRoutingPadHoles(): Promise<RawPcbPad[]> {
+    const padOwnerByPrimitiveId = new Map<string, string>();
+    for (const component of await eda.pcb_PrimitiveComponent.getAll().catch(() => [])) {
+        const designator = component.getState_Designator() || '';
+        for (const statePad of component.getState_Pads() ?? []) {
+            const primitiveId = safeString(statePad.primitiveId);
+            if (primitiveId) padOwnerByPrimitiveId.set(primitiveId, designator);
+        }
+    }
+
+    const pads: RawPcbPad[] = [];
+    for (const pad of await eda.pcb_PrimitivePad.getAll().catch(() => [])) {
+        const hole = pad.getState_Hole();
+        if (!hole) continue;
+        const primitiveId = pad.getState_PrimitiveId();
+        pads.push({
+            id: primitiveId,
+            component: padOwnerByPrimitiveId.get(primitiveId),
+            x: milToMm(pad.getState_X()),
+            y: milToMm(pad.getState_Y()),
+            net: safeString(pad.getState_Net()) ?? '',
+            padNumber: pad.getState_PadNumber(),
+            layer: rawLayerName(pad.getState_Layer()),
+            rotation: pad.getState_Rotation(),
+            hole: {
+                data: hole.map(value => typeof value === 'number' ? milToMm(value) : value),
+                offsetX: toMmCopperGrid(pad.getState_HoleOffsetX()),
+                offsetY: toMmCopperGrid(pad.getState_HoleOffsetY()),
+                rotation: pad.getState_HoleRotation(),
+            },
+        });
+    }
+    return pads;
+}
+
 export async function getPcbRaw(): Promise<RawPcb> {
     if (VERSION_EDASYEDA[0] < 3) throw new Error(`EasyEda version required >= 3, current ${VERSION_EDASYEDA[0]}`);
     const boardPolygon = await readBoardPolygon();

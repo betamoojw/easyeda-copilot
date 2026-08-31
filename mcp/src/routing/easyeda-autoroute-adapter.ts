@@ -7,6 +7,7 @@ import type {
     RoutingCopper,
     RoutingClearIntent,
     RoutingDiagnostic,
+    RoutingPad,
     RoutingPadShape,
     RoutingResult,
     RoutingRuleValues,
@@ -20,6 +21,8 @@ export type EasyEdaAutorouteCaptureOptions = Readonly<{
     clearRouting?: RoutingClearIntent;
     copperLayerCount?: number;
     copperLayerIds?: readonly number[];
+    /** Native pcb_PrimitivePad records with holes; autorouter JSON omits them. */
+    padHoles?: readonly unknown[];
 }>;
 
 export type EasyEdaAutorouteImport = Readonly<{
@@ -450,6 +453,90 @@ function importedKeepouts(root: JsonRecord, layerNames: readonly string[], diagn
     });
 }
 
+type NativePadHole = Readonly<{
+    id?: string;
+    component?: string;
+    number?: string;
+    net?: string;
+    at: PointMm;
+    hole: NonNullable<RoutingPad['hole']>;
+}>;
+
+function nativePadHoles(value: readonly unknown[], diagnostics: RoutingDiagnostic[]): readonly NativePadHole[] {
+    return value.flatMap((item, index) => {
+        const pad = record(item);
+        const rawHole = record(pad?.hole);
+        const data = Array.isArray(rawHole?.data) ? rawHole.data : [];
+        const kind = typeof data[0] === 'string' ? data[0].trim().toUpperCase() : '';
+        const diameterMm = finite(data[1]);
+        const x = finite(pad?.x);
+        const y = finite(pad?.y);
+        if (!pad || !rawHole || x === undefined || y === undefined || !(diameterMm !== undefined && diameterMm > 0)
+            || (kind !== 'ROUND' && kind !== 'SLOT')) {
+            diagnostics.push({
+                code: 'EASYEDA_PAD_HOLE_INVALID', severity: 'warning',
+                message: `Native pad hole ${index} is malformed and was ignored.`,
+            });
+            return [];
+        }
+        const slotLength = kind === 'SLOT' ? finite(data[2]) : undefined;
+        if (kind === 'SLOT' && !(slotLength !== undefined && slotLength >= diameterMm)) {
+            diagnostics.push({
+                code: 'EASYEDA_PAD_HOLE_INVALID', severity: 'warning',
+                message: `Native slot ${index} has an invalid length and was ignored.`,
+            });
+            return [];
+        }
+        const offsetX = finite(rawHole.offsetX) ?? 0;
+        const offsetY = finite(rawHole.offsetY) ?? 0;
+        const rotationDeg = finite(rawHole.rotation) ?? 0;
+        const net = text(pad.net);
+        const hole: NonNullable<RoutingPad['hole']> = {
+            shape: kind === 'SLOT' ? 'slot' : 'round',
+            diameterMm,
+            ...(kind === 'SLOT' ? { slotLengthMm: Number((slotLength! - diameterMm).toFixed(12)) } : {}),
+            ...(offsetX !== 0 || offsetY !== 0 ? { offset: { x: offsetX, y: offsetY === 0 ? 0 : -offsetY } } : {}),
+            ...(rotationDeg !== 0 ? { rotationDeg: -rotationDeg } : {}),
+            // EasyEDA's pad API does not expose a separate plating flag. A
+            // drilled pad carrying a net is electrically plated; an unnetted
+            // mechanical hole must not bridge copper layers.
+            plated: Boolean(net),
+        };
+        return [{
+            id: text(pad.id),
+            component: text(pad.component),
+            number: pad.padNumber === undefined ? undefined : String(pad.padNumber),
+            net,
+            at: { x, y: y === 0 ? 0 : -y },
+            hole,
+        }];
+    });
+}
+
+function findNativePadHole(
+    holes: readonly NativePadHole[],
+    used: Set<number>,
+    identity: Readonly<{ id: string; component: string; number: string; net?: string; at: PointMm }>,
+) {
+    const distance = (item: NativePadHole) => Math.hypot(item.at.x - identity.at.x, item.at.y - identity.at.y);
+    const candidates = holes.map((item, index) => ({ item, index, distance: distance(item) }))
+        .filter(candidate => !used.has(candidate.index));
+    const exactId = candidates.find(candidate => candidate.item.id === identity.id
+        && (!candidate.item.component || candidate.item.component === identity.component));
+    const matched = exactId ?? candidates
+        .filter(candidate => (!candidate.item.component || candidate.item.component === identity.component)
+            && (!candidate.item.number || candidate.item.number === identity.number)
+            && (!candidate.item.net || !identity.net || candidate.item.net === identity.net)
+            && candidate.distance <= 0.05)
+        .sort((left, right) => left.distance - right.distance)[0];
+    if (!matched) return undefined;
+    used.add(matched.index);
+    return {
+        ...matched.item.hole,
+        plated: Boolean(identity.net || matched.item.net),
+    };
+}
+
 export function importEasyEdaAutorouteJson(
     value: unknown,
     options: EasyEdaAutorouteCaptureOptions = {},
@@ -487,6 +574,8 @@ export function importEasyEdaAutorouteJson(
     const components: RoutingBoard['components'][number][] = [];
     const pads: RoutingBoard['pads'][number][] = [];
     const netNames = new Set<string>();
+    const capturedPadHoles = nativePadHoles(options.padHoles ?? [], diagnostics);
+    const usedPadHoles = new Set<number>();
     for (const [componentKey, componentValue] of Object.entries(componentRecords)) {
         const component = record(componentValue);
         if (!component) continue;
@@ -533,18 +622,29 @@ export function importEasyEdaAutorouteJson(
                 });
                 continue;
             }
+            const number = String(pad.number ?? pinNames[padKey] ?? padKey);
+            const hole = findNativePadHole(capturedPadHoles, usedPadHoles, {
+                id: padKey, component: designator, number, net, at: atPad,
+            });
+            if (options.padHoles !== undefined && padLayers.length > 1 && !hole) {
+                diagnostics.push({
+                    code: 'EASYEDA_PAD_HOLE_METADATA_MISSING', severity: 'warning',
+                    message: `${designator}.${number} spans multiple copper layers but has no native drill metadata.`,
+                });
+            }
             pads.push({
                 id: `${designator}:${padKey}`,
                 component: designator,
                 // footprint pad numbers are the canonical DSL identity.
                 // component.pinName may contain display labels such as VIN,
                 // Ground, A, or K rather than the numeric pad number.
-                number: String(pad.number ?? pinNames[padKey] ?? padKey),
+                number,
                 ...(net ? { net } : {}),
                 at: atPad,
                 rotationDeg,
                 layers: padLayers,
                 shape,
+                ...(hole ? { hole } : {}),
             });
         }
     }
