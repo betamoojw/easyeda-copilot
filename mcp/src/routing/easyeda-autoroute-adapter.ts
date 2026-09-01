@@ -7,7 +7,6 @@ import type {
     RoutingCopper,
     RoutingClearIntent,
     RoutingDiagnostic,
-    RoutingPad,
     RoutingPadShape,
     RoutingResult,
     RoutingRuleValues,
@@ -21,8 +20,6 @@ export type EasyEdaAutorouteCaptureOptions = Readonly<{
     clearRouting?: RoutingClearIntent;
     copperLayerCount?: number;
     copperLayerIds?: readonly number[];
-    /** Native pcb_PrimitivePad records with holes; autorouter JSON omits them. */
-    padHoles?: readonly unknown[];
 }>;
 
 export type EasyEdaAutorouteImport = Readonly<{
@@ -242,17 +239,6 @@ function rotate(pointValue: PointMm, degrees: number): PointMm {
     };
 }
 
-function normalizeDegrees(degrees: number) {
-    const normalized = ((degrees + 180) % 360 + 360) % 360 - 180;
-    return Math.abs(normalized) < 1e-9 ? 0 : normalized;
-}
-
-function easyEdaRadiansToDegrees(radians: number) {
-    // Native EasyEDA pad angles use its Y-up coordinate system and radians.
-    // RoutingBoard is Y-down and uses degrees, so reflection reverses the sign.
-    return normalizeDegrees(-radians * 180 / Math.PI);
-}
-
 function internalLayerName(id: number) {
     // The host/router boundary is EDA-neutral. KRT-specific F.Cu/InN.Cu/B.Cu
     // names are introduced only by copilot-router's KRT adapter.
@@ -464,161 +450,11 @@ function importedKeepouts(root: JsonRecord, layerNames: readonly string[], diagn
     });
 }
 
-type NativePadHole = Readonly<{
-    id?: string;
-    component?: string;
-    number?: string;
-    net?: string;
-    at: PointMm;
-    /** Absolute native pad orientation after converting EasyEDA's coordinate system. */
-    padRotationDeg: number;
-    hole: NonNullable<RoutingPad['hole']>;
-}>;
-
-function rotatedPadShape(shape: RoutingPadShape, degrees: number): RoutingPadShape {
-    const rotation = normalizeDegrees(degrees);
-    if (rotation === 0 || shape.kind === 'circle') return shape;
-    if (shape.kind === 'polygon') return {
-        kind: 'polygon',
-        polygon: {
-            outer: shape.polygon.outer.map(pointValue => rotate(pointValue, rotation)),
-            ...(shape.polygon.holes ? {
-                holes: shape.polygon.holes.map(ring => ring.map(pointValue => rotate(pointValue, rotation))),
-            } : {}),
-        },
-    };
-    if (shape.kind === 'rect') {
-        if (Math.abs(Math.abs(rotation) - 90) < 1e-9) {
-            return { kind: 'rect', widthMm: shape.heightMm, heightMm: shape.widthMm };
-        }
-        if (Math.abs(Math.abs(rotation) - 180) < 1e-9) return shape;
-        const halfWidth = shape.widthMm / 2;
-        const halfHeight = shape.heightMm / 2;
-        return {
-            kind: 'polygon',
-            polygon: {
-                outer: [
-                    { x: -halfWidth, y: -halfHeight },
-                    { x: halfWidth, y: -halfHeight },
-                    { x: halfWidth, y: halfHeight },
-                    { x: -halfWidth, y: halfHeight },
-                ].map(pointValue => rotate(pointValue, rotation)),
-            },
-        };
-    }
-
-    // importedPadShape currently produces only circle/rect/polygon, but keep
-    // quarter-turns safe if oval or round-rect support is added later.
-    if (Math.abs(Math.abs(rotation) - 90) < 1e-9) return shape.kind === 'oval'
-        ? { kind: 'oval', widthMm: shape.heightMm, heightMm: shape.widthMm }
-        : {
-            kind: 'round-rect', widthMm: shape.heightMm, heightMm: shape.widthMm,
-            cornerRadiusMm: shape.cornerRadiusMm,
-        };
-    return shape;
-}
-
-function nativePadHoles(value: readonly unknown[], diagnostics: RoutingDiagnostic[]): readonly NativePadHole[] {
-    return value.flatMap((item, index) => {
-        const pad = record(item);
-        const rawHole = record(pad?.hole);
-        const data = Array.isArray(rawHole?.data) ? rawHole.data : [];
-        const kind = typeof data[0] === 'string' ? data[0].trim().toUpperCase() : '';
-        const diameterMm = finite(data[1]);
-        const x = finite(pad?.x);
-        const y = finite(pad?.y);
-        if (!pad || !rawHole || x === undefined || y === undefined || !(diameterMm !== undefined && diameterMm > 0)
-            || (kind !== 'ROUND' && kind !== 'SLOT')) {
-            diagnostics.push({
-                code: 'EASYEDA_PAD_HOLE_INVALID', severity: 'warning',
-                message: `Native pad hole ${index} is malformed and was ignored.`,
-            });
-            return [];
-        }
-        const slotLength = kind === 'SLOT' ? finite(data[2]) : undefined;
-        if (kind === 'SLOT' && !(slotLength !== undefined && slotLength >= diameterMm)) {
-            diagnostics.push({
-                code: 'EASYEDA_PAD_HOLE_INVALID', severity: 'warning',
-                message: `Native slot ${index} has an invalid length and was ignored.`,
-            });
-            return [];
-        }
-        const offsetX = finite(rawHole.offsetX) ?? 0;
-        const offsetY = finite(rawHole.offsetY) ?? 0;
-        const padRotationDeg = easyEdaRadiansToDegrees(finite(pad.rotation) ?? 0);
-        const rotationDeg = easyEdaRadiansToDegrees(finite(rawHole.rotation) ?? 0);
-        const net = text(pad.net);
-        const hole: NonNullable<RoutingPad['hole']> = {
-            shape: kind === 'SLOT' ? 'slot' : 'round',
-            diameterMm,
-            ...(kind === 'SLOT' ? { slotLengthMm: Number((slotLength! - diameterMm).toFixed(12)) } : {}),
-            ...(offsetX !== 0 || offsetY !== 0 ? { offset: { x: offsetX, y: offsetY === 0 ? 0 : -offsetY } } : {}),
-            ...(rotationDeg !== 0 ? { rotationDeg } : {}),
-            // EasyEDA's pad API does not expose a separate plating flag. A
-            // drilled pad carrying a net is electrically plated; an unnetted
-            // mechanical hole must not bridge copper layers.
-            plated: Boolean(net),
-        };
-        return [{
-            id: text(pad.id),
-            component: text(pad.component),
-            number: pad.padNumber === undefined ? undefined : String(pad.padNumber),
-            net,
-            at: { x, y: y === 0 ? 0 : -y },
-            padRotationDeg,
-            hole,
-        }];
-    });
-}
-
-function findNativePadHole(
-    holes: readonly NativePadHole[],
-    used: Set<number>,
-    identity: Readonly<{
-        id: string;
-        component: string;
-        number: string;
-        net?: string;
-        at: PointMm;
-        rotationDeg: number;
-        shape: RoutingPadShape;
-    }>,
-) {
-    const distance = (item: NativePadHole) => Math.hypot(item.at.x - identity.at.x, item.at.y - identity.at.y);
-    const candidates = holes.map((item, index) => ({ item, index, distance: distance(item) }))
-        .filter(candidate => !used.has(candidate.index));
-    const exactId = candidates.find(candidate => candidate.item.id === identity.id
-        && (!candidate.item.component || candidate.item.component === identity.component)
-        && candidate.distance <= 0.05);
-    const matched = exactId ?? candidates
-        .filter(candidate => (!candidate.item.component || candidate.item.component === identity.component)
-            && (!candidate.item.number || candidate.item.number === identity.number)
-            && (!candidate.item.net || !identity.net || candidate.item.net === identity.net)
-            && candidate.distance <= 0.05)
-        .sort((left, right) => left.distance - right.distance)[0];
-    if (!matched) return undefined;
-    used.add(matched.index);
-    const sourceHole = matched.item.hole;
-    const sourceOffset = sourceHole.offset ?? { x: 0, y: 0 };
-    const globalOffset = rotate(sourceOffset, matched.item.padRotationDeg);
-    // KiCad has no independent slot-drill angle: an oval drill follows the
-    // pad angle. Reframe the copper pad around the slot's absolute angle so
-    // both the native copper outline and the native drill remain unchanged.
-    const rotationDeg = sourceHole.shape === 'slot'
-        ? normalizeDegrees(matched.item.padRotationDeg + (sourceHole.rotationDeg ?? 0))
-        : normalizeDegrees(identity.rotationDeg);
-    const localOffset = rotate(globalOffset, -rotationDeg);
-    const { offset: _sourceOffset, rotationDeg: _sourceRotation, ...holeGeometry } = sourceHole;
-    const hole: NonNullable<RoutingPad['hole']> = {
-        ...holeGeometry,
-        ...(localOffset.x !== 0 || localOffset.y !== 0 ? { offset: localOffset } : {}),
-        plated: Boolean(identity.net || matched.item.net),
-    };
-    return {
-        hole,
-        rotationDeg,
-        shape: rotatedPadShape(identity.shape, identity.rotationDeg - rotationDeg),
-    };
+function ruleLayerIds(root: JsonRecord) {
+    const rules = record(root.rules) ?? {};
+    const families = ['safeClearances', 'trackWidths'] as const;
+    return families.flatMap(family => Object.values(record(rules[family]) ?? {})
+        .flatMap(entries => records(entries).flatMap(entry => numberList(entry.layers))));
 }
 
 export function importEasyEdaAutorouteJson(
@@ -636,6 +472,7 @@ export function importEasyEdaAutorouteJson(
     const footprintRecords = record(root.footprints) ?? {};
     const footprintLayerIds = Object.values(footprintRecords).flatMap(footprint =>
         Object.values(record(record(footprint)?.pads) ?? {}).flatMap(pad => numberList(record(pad)?.layers)));
+    const nativeRuleLayerIds = ruleLayerIds(root);
     const hostLayerIds = [
         ...numberList(options.copperLayerIds),
         ...copperLayerIdsForCount(options.copperLayerCount),
@@ -643,6 +480,7 @@ export function importEasyEdaAutorouteJson(
     const allLayerIds = [...new Set([
         ...routeLayerIds,
         ...notRouteLayerIds,
+        ...nativeRuleLayerIds,
         ...(hostLayerIds.length ? hostLayerIds : footprintLayerIds),
     ])].sort((left, right) => {
         const rank = (id: number) => id === 1 ? 0 : id === 2 ? Number.MAX_SAFE_INTEGER : id - 13;
@@ -658,8 +496,6 @@ export function importEasyEdaAutorouteJson(
     const components: RoutingBoard['components'][number][] = [];
     const pads: RoutingBoard['pads'][number][] = [];
     const netNames = new Set<string>();
-    const capturedPadHoles = nativePadHoles(options.padHoles ?? [], diagnostics);
-    const usedPadHoles = new Set<number>();
     for (const [componentKey, componentValue] of Object.entries(componentRecords)) {
         const component = record(componentValue);
         if (!component) continue;
@@ -707,15 +543,6 @@ export function importEasyEdaAutorouteJson(
                 continue;
             }
             const number = String(pad.number ?? pinNames[padKey] ?? padKey);
-            const nativeHole = findNativePadHole(capturedPadHoles, usedPadHoles, {
-                id: padKey, component: designator, number, net, at: atPad, rotationDeg, shape,
-            });
-            if (options.padHoles !== undefined && padLayers.length > 1 && !nativeHole) {
-                diagnostics.push({
-                    code: 'EASYEDA_PAD_HOLE_METADATA_MISSING', severity: 'warning',
-                    message: `${designator}.${number} spans multiple copper layers but has no native drill metadata.`,
-                });
-            }
             pads.push({
                 id: `${designator}:${padKey}`,
                 component: designator,
@@ -725,10 +552,9 @@ export function importEasyEdaAutorouteJson(
                 number,
                 ...(net ? { net } : {}),
                 at: atPad,
-                rotationDeg: nativeHole?.rotationDeg ?? rotationDeg,
+                rotationDeg,
                 layers: padLayers,
-                shape: nativeHole?.shape ?? shape,
-                ...(nativeHole ? { hole: nativeHole.hole } : {}),
+                shape,
             });
         }
     }

@@ -86,19 +86,6 @@ async function executeRoutingOperation(
     const source = typeof capture?.text === 'string' ? capture.text : '';
     if (!capture || !source) throw new Error('EasyEDA returned empty autoroute JSON.');
     await writeFile(join(artifactsDirectory, 'easyeda-routing-input.json'), source);
-    const padHoles = Array.isArray(capture.padHoles) ? capture.padHoles : [];
-    await writeFile(
-        join(artifactsDirectory, 'easyeda-pad-holes.json'),
-        `${JSON.stringify(padHoles, null, 2)}\n`,
-    );
-    const stack = record(capture.stack);
-    const copperLayerIds = Array.isArray(stack?.layers) ? stack.layers.flatMap(item => {
-        const id = record(item)?.id;
-        return typeof id === 'number' && Number.isFinite(id) ? [id] : [];
-    }) : [];
-    const copperLayerCount = typeof stack?.copperLayerCount === 'number' && Number.isFinite(stack.copperLayerCount)
-        ? stack.copperLayerCount
-        : undefined;
     const nativeDrc = PcbDrcBundleSchema().parse(capture.drc) as PcbDrcBundle;
     await writeFile(
         join(artifactsDirectory, 'easyeda-drc-input.json'),
@@ -109,9 +96,6 @@ async function executeRoutingOperation(
     context.setStage('importing');
     const imported = importEasyEdaAutorouteJson(JSON.parse(source) as unknown, {
         ...(program.clearRouting ? { clearRouting: program.clearRouting } : {}),
-        ...(copperLayerCount === undefined ? {} : { copperLayerCount }),
-        ...(copperLayerIds.length ? { copperLayerIds } : {}),
-        padHoles,
     });
     if (!imported.board) {
         throw new Error(`EasyEDA routing import failed:\n${diagnosticsMessage(imported.diagnostics)}`);
@@ -174,12 +158,12 @@ async function executeRoutingOperation(
     );
     const shouldApplyDrc = result.operation === 'apply-drc' || result.operation === 'all';
     const ruleChanges = diffRoutingRules(sourceRules, result.rules);
-    let bundle = shouldApplyDrc && ruleChanges.hasChanges
-        ? routingRulesToEasyEdaDrcBundle(nativeDrc, sourceRules, result.rules)
-        : undefined;
     const zonesWithDrc = application.zones.filter(zone => (
         zone.clearanceMm !== undefined || zone.connection !== undefined || zone.padConnection !== undefined
     ));
+    let bundle = shouldApplyDrc && ruleChanges.hasChanges
+        ? routingRulesToEasyEdaDrcBundle(nativeDrc, sourceRules, result.rules)
+        : undefined;
     if (zonesWithDrc.length) {
         bundle = routingZonesToEasyEdaDrcBundle(bundle ?? nativeDrc, zonesWithDrc);
     }

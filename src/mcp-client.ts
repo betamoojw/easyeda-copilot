@@ -11,7 +11,6 @@ import {
     getPcb,
     getPcbExistingPlacement,
     getPcbRaw,
-    getPcbRoutingPadHoles,
     inspectComponent,
     inspectNet,
 } from './eda/pcb';
@@ -1427,19 +1426,17 @@ async function handleMessage(message: McpMessage, connectionEpoch: number) {
 
         if (message.event === 'export-routing-input') {
             const { file, text } = await exportRoutingInput();
-            const [drc, stack, padHoles] = await Promise.all([
-                exportPcbDrcRules(),
-                getPcbStackLayers(),
-                getPcbRoutingPadHoles(),
-            ]);
+            // Autoroute JSON is authoritative for board geometry, copper
+            // layers, pads, and effective physical rules. Native DRC remains
+            // separate because EasyEDA omits named net classes and equal-
+            // length groups from this file on otherwise valid boards.
+            const drc = await exportPcbDrcRules();
             reply(true, {
                 name: file.name,
                 size: file.size,
                 type: file.type,
                 text,
                 drc,
-                stack,
-                padHoles,
             });
             return;
         }
