@@ -79,14 +79,40 @@ assert.equal(
 const nativeSlotImport = adapter.importEasyEdaAutorouteJson(fixture, {
     padHoles: [{
         ...nativeRoundHole,
-        hole: { data: ['SLOT', 0.6, 1.4], offsetX: 0.1, offsetY: -0.2, rotation: 45 },
+        // Preview/Get Rough PCB reports both rotations in radians. The hole
+        // offset is pad-local and therefore follows the native pad rotation.
+        rotation: Math.PI / 2,
+        hole: { data: ['SLOT', 0.6, 1.4], offsetX: 0.1, offsetY: -0.2, rotation: Math.PI / 4 },
     }],
 });
 assert.ok(nativeSlotImport.board, JSON.stringify(nativeSlotImport.diagnostics));
+assert.equal(nativeSlotImport.board.pads[2].rotationDeg, -135,
+    'a slot must use its absolute native angle because KiCad drills cannot rotate independently of pads');
 assert.deepEqual(nativeSlotImport.board.pads[2].hole, {
     shape: 'slot', diameterMm: 0.6, slotLengthMm: 0.8,
-    offset: { x: 0.1, y: 0.2 }, rotationDeg: -45, plated: true,
+    offset: { x: -0.070711, y: 0.212132 }, plated: true,
 });
+
+const nativeOffsetRoundImport = adapter.importEasyEdaAutorouteJson(fixture, {
+    padHoles: [{
+        ...nativeRoundHole,
+        rotation: Math.PI / 2,
+        hole: { data: ['ROUND', 0.9], offsetX: 0.1, offsetY: -0.2, rotation: Math.PI / 3 },
+    }],
+});
+assert.ok(nativeOffsetRoundImport.board, JSON.stringify(nativeOffsetRoundImport.diagnostics));
+assert.equal(nativeOffsetRoundImport.board.pads[2].rotationDeg, 0,
+    'a round drill must not disturb the autorouter copper-pad frame');
+assert.deepEqual(nativeOffsetRoundImport.board.pads[2].hole, {
+    shape: 'round', diameterMm: 0.9, offset: { x: 0.2, y: -0.1 }, plated: true,
+}, 'round-hole offsets must rotate with the native pad before entering RoutingBoard');
+
+const distantIdImport = adapter.importEasyEdaAutorouteJson(fixture, {
+    padHoles: [{ ...nativeRoundHole, id: 'p0', x: 50, y: 50 }],
+});
+assert.ok(distantIdImport.board, JSON.stringify(distantIdImport.diagnostics));
+assert.equal(distantIdImport.board.pads[2].hole, undefined,
+    'a coincidental footprint-local id must not attach a remote native hole to the wrong placed pad');
 
 const missingNativeHoleImport = adapter.importEasyEdaAutorouteJson(fixture, { padHoles: [] });
 assert.ok(missingNativeHoleImport.board, JSON.stringify(missingNativeHoleImport.diagnostics));
@@ -142,6 +168,32 @@ assert.deepEqual(bottomImport.board.pads.map(item => ({
     { id: 'B1:p1', number: '1', net: 'SIG_N', at: { x: 2, y: -1 }, layers: ['BOTTOM'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
     { id: 'B1:p2', number: '3', net: 'GND', at: { x: 1, y: -3 }, layers: ['BOTTOM'], shape: { kind: 'rect', widthMm: 1, heightMm: 1 } },
 ]);
+
+const bottomHoleFixture = structuredClone(bottomFixture);
+bottomHoleFixture.footprints.fp.pads.p0.layers = [1, 2];
+bottomHoleFixture.footprints.fp.pads.p0.diameter = 2;
+const bottomHoleImport = adapter.importEasyEdaAutorouteJson(bottomHoleFixture, {
+    padHoles: [{
+        id: 'p0', component: 'B1', x: 0, y: 1, net: 'SIG', padNumber: '2',
+        layer: 'MULTI', rotation: Math.PI / 2,
+        hole: { data: ['SLOT', 0.6, 1.4], offsetX: 0.1, offsetY: 0.2, rotation: Math.PI / 2 },
+    }],
+});
+assert.ok(bottomHoleImport.board, JSON.stringify(bottomHoleImport.diagnostics));
+assert.deepEqual({
+    at: bottomHoleImport.board.pads[0].at,
+    rotationDeg: bottomHoleImport.board.pads[0].rotationDeg,
+    layers: bottomHoleImport.board.pads[0].layers,
+    shape: bottomHoleImport.board.pads[0].shape,
+    hole: bottomHoleImport.board.pads[0].hole,
+}, {
+    at: { x: 0, y: -1 }, rotationDeg: -180, layers: ['BOTTOM', 'TOP'],
+    shape: { kind: 'circle', diameterMm: 2 },
+    hole: {
+        shape: 'slot', diameterMm: 0.6, slotLengthMm: 0.8,
+        offset: { x: 0.2, y: 0.1 }, plated: true,
+    },
+}, 'bottom-side slots must preserve native global position, rotation, and local offset');
 
 const curvedRegionFixture = structuredClone(fixture);
 curvedRegionFixture.fillRegions = [{

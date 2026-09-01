@@ -31,11 +31,14 @@ export const RawPcbPadSchema = () => z.object({
         z.array(z.union([z.number(), z.string()])),
         z.array(z.array(z.union([z.number(), z.string()])))
     ])).optional(),
+    /** Native EasyEDA pad rotation in radians. */
     rotation: z.number(),
     hole: z.object({
         data: z.array(z.string().or(z.number())),
+        /** Pad-local hole offset, normalized to millimetres. */
         offsetX: z.number(),
         offsetY: z.number(),
+        /** Native EasyEDA hole rotation relative to the pad, in radians. */
         rotation: z.number(),
     }).optional()
 });
